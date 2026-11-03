@@ -1,0 +1,27 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+}
+
+html, body {
+  font-family: -apple-system, "SF Arabic", "Segoe UI", Tahoma, Roboto, "Noto Naskh Arabic", system-ui, sans-serif;
+  background-color: #f8fafc;
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+input, select, textarea, button {
+  font-family: inherit;
+}
+
+/* Printable report view (used for PDF capture) stays hidden on screen */
+.print-capture-root {
+  position: fixed;
+  top: 0;
+  left: -99999px;
+  width: 760px;
+  background: #ffffff;
+}
