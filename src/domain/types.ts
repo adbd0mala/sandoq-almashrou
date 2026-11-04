@@ -27,7 +27,11 @@ export interface ExpenseCategory {
   createdAt: string
 }
 
-export type LedgerEntryType = 'CONTRIBUTION' | 'EXPENSE'
+/** ADVANCE = money paid out before it's known which بند it belongs to (e.g.
+ * a down payment to a contractor while work is still ongoing). It leaves the
+ * vault immediately like an EXPENSE, but has no categoryId; allocateAdvance
+ * later recognizes portions of it against real بنود. */
+export type LedgerEntryType = 'CONTRIBUTION' | 'EXPENSE' | 'ADVANCE'
 
 export interface LedgerEntry {
   id: string
@@ -39,10 +43,19 @@ export interface LedgerEntry {
   paymentMethod?: PaymentMethod
   invoiceNumber?: string
   funderId?: string // CONTRIBUTION
-  categoryId?: string // EXPENSE
+  categoryId?: string // EXPENSE (including advance-allocation entries)
   createdAt: string
   reversed?: boolean // true once a REVERSAL has cancelled this entry
   reversalOfId?: string // set on the reversal entry itself
+  /** false only on advance-allocation entries: the cash already left the
+   * vault when the original ADVANCE was recorded, so these category-tagged
+   * entries must NOT be subtracted from the vault balance again. Undefined
+   * (all pre-existing entries, and every CONTRIBUTION/EXPENSE/ADVANCE
+   * created directly) means true — it's a normal cash-moving entry. */
+  affectsVault?: boolean
+  /** Set on an advance-allocation entry: the id of the ADVANCE ledger entry
+   * this recognizes a portion of against a category. */
+  advanceOriginId?: string
 }
 
 export interface ExpenseAllocation {

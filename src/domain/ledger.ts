@@ -156,7 +156,10 @@ export async function deleteCategoryIfUnused(id: string): Promise<void> {
 
 export async function getVaultBalanceQirsh(): Promise<number> {
   const entries = await db.ledger.toArray()
-  return entries.reduce((sum, e) => sum + signedAmount(e), 0)
+  // Advance-allocation entries (affectsVault === false) recognize a category
+  // cost for money that already left the vault when the ADVANCE itself was
+  // recorded — counting them again here would double-subtract that cash.
+  return entries.reduce((sum, e) => sum + (e.affectsVault === false ? 0 : signedAmount(e)), 0)
 }
 
 export function signedAmount(e: LedgerEntry): number {
@@ -210,6 +213,26 @@ export interface RecordExpenseInput {
   invoiceNumber?: string
 }
 
+/** Splits amountQirsh across activeFunders by current share% and records one
+ * ExpenseAllocation row per funder, so later "نصيب كل ممول من المصروفات"
+ * reports reflect this cash leaving the vault. */
+async function recordFunderAllocations(ledgerEntryId: string, amountQirsh: number, activeFunders: Funder[]): Promise<void> {
+  const split = splitProportionally(
+    amountQirsh,
+    activeFunders.map((f) => ({ key: f.id, percent: f.sharePercent })),
+  )
+  for (const s of split) {
+    const funder = activeFunders.find((f) => f.id === s.key)!
+    await db.allocations.add({
+      id: newId(),
+      ledgerEntryId,
+      funderId: s.key,
+      sharePercentApplied: funder.sharePercent,
+      amountQirsh: s.amountQirsh,
+    })
+  }
+}
+
 /** Inserts one EXPENSE ledger entry + its per-funder allocation. Assumes it
  * already runs inside an open Dexie transaction covering ledger/allocations
  * — callers (recordExpense, recordSplitExpense) own the transaction and the
@@ -231,22 +254,7 @@ async function insertExpenseEntry(input: RecordExpenseInput, activeFunders: Fund
     createdAt: new Date().toISOString(),
   }
   await db.ledger.add(entry)
-
-  const split = splitProportionally(
-    input.amountQirsh,
-    activeFunders.map((f) => ({ key: f.id, percent: f.sharePercent })),
-  )
-  for (const s of split) {
-    const funder = activeFunders.find((f) => f.id === s.key)!
-    await db.allocations.add({
-      id: newId(),
-      ledgerEntryId: entry.id,
-      funderId: s.key,
-      sharePercentApplied: funder.sharePercent,
-      amountQirsh: s.amountQirsh,
-    })
-  }
-
+  await recordFunderAllocations(entry.id, input.amountQirsh, activeFunders)
   return entry
 }
 
@@ -588,6 +596,117 @@ export async function recordSplitExpenseWithPayable(
   })
 }
 
+// ---------------------------------------------------------------------------
+// Advances — pay a contractor/supplier before knowing which بند the money
+// will end up against (e.g. a down payment while work is still ongoing).
+// Cash leaves the vault immediately; allocateAdvance later recognizes
+// portions of it against real بنود once the work/usage is known, without
+// touching the vault again (the cash already left).
+// ---------------------------------------------------------------------------
+
+export interface RecordAdvanceInput {
+  amountQirsh: number
+  date: string
+  description: string
+  counterparty?: string
+  paymentMethod?: PaymentMethod
+  invoiceNumber?: string
+}
+
+export async function recordAdvance(input: RecordAdvanceInput): Promise<LedgerEntry> {
+  if (input.amountQirsh <= 0) throw new LedgerError('قيمة الدفعة يجب أن تكون أكبر من صفر')
+
+  return db.transaction('rw', [db.ledger, db.funders, db.allocations, db.settings], async () => {
+    const activeFunders = await checkCanSpend(input.amountQirsh)
+    const entry: LedgerEntry = {
+      id: newId(),
+      type: 'ADVANCE',
+      date: input.date,
+      amountQirsh: input.amountQirsh,
+      description: input.description.trim() || 'دفعة غير موزعة',
+      counterparty: input.counterparty?.trim() || undefined,
+      paymentMethod: input.paymentMethod,
+      invoiceNumber: input.invoiceNumber?.trim() || undefined,
+      createdAt: new Date().toISOString(),
+    }
+    await db.ledger.add(entry)
+    await recordFunderAllocations(entry.id, input.amountQirsh, activeFunders)
+    return entry
+  })
+}
+
+export interface AdvanceStatus {
+  advance: LedgerEntry
+  allocatedQirsh: number
+  remainingQirsh: number
+  allocationEntries: LedgerEntry[]
+}
+
+export async function getAdvanceStatus(advanceLedgerEntryId: string): Promise<AdvanceStatus> {
+  const advance = await db.ledger.get(advanceLedgerEntryId)
+  if (!advance || advance.type !== 'ADVANCE') throw new LedgerError('الدفعة غير موجودة')
+
+  const allocationEntries = await db.ledger.where('advanceOriginId').equals(advanceLedgerEntryId).toArray()
+  const allocatedQirsh = allocationEntries.reduce((s, e) => s - signedAmount(e), 0)
+
+  return { advance, allocatedQirsh, remainingQirsh: advance.amountQirsh - allocatedQirsh, allocationEntries }
+}
+
+export async function listOpenAdvances(): Promise<AdvanceStatus[]> {
+  const all = await db.ledger.where('type').equals('ADVANCE').toArray()
+  const origins = all.filter((e) => !e.reversalOfId) // exclude reversal markers, keep only original advances
+  const statuses = await Promise.all(origins.map((a) => getAdvanceStatus(a.id)))
+  return statuses.filter((s) => s.remainingQirsh > 0 && !s.advance.reversed).sort((a, b) => a.advance.date.localeCompare(b.advance.date))
+}
+
+export interface AllocateAdvanceInput {
+  advanceLedgerEntryId: string
+  date: string
+  lines: { categoryId: string; amountQirsh: number; note?: string }[]
+}
+
+/** Recognizes part (or all) of an already-paid ADVANCE against one or more
+ * بنود, now that the actual usage/work is known. Creates category-tagged
+ * EXPENSE entries with affectsVault:false — the vault was already debited
+ * when the advance itself was recorded, so these must not debit it again. */
+export async function allocateAdvance(input: AllocateAdvanceInput): Promise<LedgerEntry[]> {
+  if (input.lines.length === 0) throw new LedgerError('أضف بند واحد على الأقل للتوزيع')
+  if (input.lines.some((l) => l.amountQirsh <= 0)) throw new LedgerError('قيمة كل بند يجب أن تكون أكبر من صفر')
+
+  return db.transaction('rw', [db.ledger, db.categories], async () => {
+    const status = await getAdvanceStatus(input.advanceLedgerEntryId)
+    const totalToAllocate = input.lines.reduce((s, l) => s + l.amountQirsh, 0)
+    if (totalToAllocate > status.remainingQirsh) {
+      throw new LedgerError(
+        `إجمالي المطلوب توزيعه أكبر من المتبقي غير الموزع (${(status.remainingQirsh / 100).toFixed(2)} ج.م)`,
+      )
+    }
+
+    const entries: LedgerEntry[] = []
+    for (const line of input.lines) {
+      const category = await db.categories.get(line.categoryId)
+      if (!category || !category.active) throw new LedgerError('بند غير موجود أو مؤرشف')
+
+      const entry: LedgerEntry = {
+        id: newId(),
+        type: 'EXPENSE',
+        date: input.date,
+        amountQirsh: line.amountQirsh,
+        description: line.note?.trim() ? `${status.advance.description} — ${line.note.trim()}` : status.advance.description,
+        counterparty: status.advance.counterparty,
+        paymentMethod: status.advance.paymentMethod,
+        categoryId: line.categoryId,
+        affectsVault: false,
+        advanceOriginId: status.advance.id,
+        createdAt: new Date().toISOString(),
+      }
+      await db.ledger.add(entry)
+      entries.push(entry)
+    }
+    return entries
+  })
+}
+
 export async function reverseEntry(entryId: string, reason: string): Promise<LedgerEntry> {
   if (!reason.trim()) throw new LedgerError('سبب الإلغاء مطلوب')
 
@@ -598,6 +717,13 @@ export async function reverseEntry(entryId: string, reason: string): Promise<Led
 
     const existingReversal = await db.ledger.where('reversalOfId').equals(entryId).first()
     if (existingReversal) throw new LedgerError('هذه الحركة مُلغاة من قبل')
+
+    if (original.type === 'ADVANCE') {
+      const hasAllocations = await db.ledger.where('advanceOriginId').equals(original.id).count()
+      if (hasAllocations > 0) {
+        throw new LedgerError('جزء من هذه الدفعة اتوزع على بنود بالفعل. لازم تلغي توزيعاتها الأول من تبويب الدفعات')
+      }
+    }
 
     const reversal: LedgerEntry = {
       id: newId(),
@@ -610,22 +736,25 @@ export async function reverseEntry(entryId: string, reason: string): Promise<Led
       invoiceNumber: original.invoiceNumber,
       funderId: original.funderId,
       categoryId: original.categoryId,
+      affectsVault: original.affectsVault,
+      advanceOriginId: original.advanceOriginId,
       reversalOfId: original.id,
       createdAt: new Date().toISOString(),
     }
     await db.ledger.add(reversal)
 
-    if (original.type === 'EXPENSE') {
-      const originalAllocations = await db.allocations.where('ledgerEntryId').equals(original.id).toArray()
-      for (const alloc of originalAllocations) {
-        await db.allocations.add({
-          id: newId(),
-          ledgerEntryId: reversal.id,
-          funderId: alloc.funderId,
-          sharePercentApplied: alloc.sharePercentApplied,
-          amountQirsh: -alloc.amountQirsh,
-        })
-      }
+    // Mirrors any funder allocation the original entry had (EXPENSE and
+    // ADVANCE both get one; CONTRIBUTION and advance-allocation entries
+    // don't, so this is a no-op for those — safe either way).
+    const originalAllocations = await db.allocations.where('ledgerEntryId').equals(original.id).toArray()
+    for (const alloc of originalAllocations) {
+      await db.allocations.add({
+        id: newId(),
+        ledgerEntryId: reversal.id,
+        funderId: alloc.funderId,
+        sharePercentApplied: alloc.sharePercentApplied,
+        amountQirsh: -alloc.amountQirsh,
+      })
     }
 
     await db.ledger.update(original.id, { reversed: true })
@@ -691,6 +820,7 @@ export interface DashboardSummary {
   totalContributionsQirsh: number
   totalExpensesQirsh: number
   totalPayablesQirsh: number
+  totalUnallocatedAdvancesQirsh: number
   funderCount: number
   categoryCount: number
   recentEntries: LedgerEntry[]
@@ -698,22 +828,27 @@ export interface DashboardSummary {
 }
 
 export async function getDashboardSummary(): Promise<DashboardSummary> {
-  const [entries, funders, categories, openPayables] = await Promise.all([
+  const [entries, funders, categories, openPayables, openAdvances] = await Promise.all([
     db.ledger.toArray(),
     db.funders.toArray(),
     db.categories.toArray(),
     listOpenPayables(),
+    listOpenAdvances(),
   ])
   const totalPayablesQirsh = openPayables.reduce((s, p) => s + p.remainingQirsh, 0)
+  const totalUnallocatedAdvancesQirsh = openAdvances.reduce((s, a) => s + a.remainingQirsh, 0)
 
   // Bucket by the entry's own type (not by the sign of signedAmount): a
   // reversed CONTRIBUTION has a negative signedAmount but must still reduce
-  // totalContributions, not inflate totalExpenses, and vice versa.
+  // totalContributions, not inflate totalExpenses, and vice versa. Entries
+  // with affectsVault === false (advance-allocation entries) are excluded
+  // from totalExpensesQirsh — their cash was already counted against the
+  // original ADVANCE, so counting them again here would double it.
   let totalContributionsQirsh = 0
   let totalExpensesQirsh = 0
   for (const e of entries) {
     if (e.type === 'CONTRIBUTION') totalContributionsQirsh += signedAmount(e)
-    else totalExpensesQirsh += -signedAmount(e)
+    else if (e.affectsVault !== false) totalExpensesQirsh += -signedAmount(e)
   }
 
   const spentByCategory = new Map<string, number>()
@@ -735,6 +870,7 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
     totalContributionsQirsh,
     totalExpensesQirsh,
     totalPayablesQirsh,
+    totalUnallocatedAdvancesQirsh,
     funderCount: funders.filter((f) => f.active).length,
     categoryCount: categories.filter((c) => c.active).length,
     recentEntries,

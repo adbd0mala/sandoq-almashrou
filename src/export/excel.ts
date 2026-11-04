@@ -12,7 +12,7 @@ function download(wb: XLSX.WorkBook, filename: string) {
 function entryRow(e: LedgerEntry) {
   return {
     التاريخ: e.date,
-    'النوع': e.type === 'CONTRIBUTION' ? 'مساهمة' : 'مصروف',
+    'النوع': e.type === 'CONTRIBUTION' ? 'مساهمة' : e.affectsVault === false ? 'توزيع دفعة' : e.type === 'ADVANCE' ? 'دفعة غير موزعة' : 'مصروف',
     'الوصف': e.description,
     'المورد/المستفيد': e.counterparty ?? '',
     'طريقة الدفع': e.paymentMethod ? PAYMENT_METHOD_LABELS[e.paymentMethod] : '',

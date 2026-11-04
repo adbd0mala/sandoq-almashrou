@@ -36,6 +36,11 @@ export class AppDatabase extends Dexie {
       payables: 'id, categoryId, originLedgerEntryId, createdAt',
       payableSettlements: 'id, payableId, ledgerEntryId',
     })
+    // v3: advances (unallocated payments, categorized later) need
+    // advanceOriginId indexed on ledger to find an advance's allocations.
+    this.version(3).stores({
+      ledger: 'id, type, date, funderId, categoryId, createdAt, reversalOfId, advanceOriginId',
+    })
   }
 }
 

@@ -4,6 +4,7 @@ import { db } from '../db/db'
 import {
   LedgerError,
   getVaultBalanceQirsh,
+  recordAdvance,
   recordExpense,
   recordExpenseWithPayable,
   recordSplitExpense,
@@ -15,21 +16,15 @@ import { PAYMENT_METHOD_LABELS, type ExpenseCategory, type PaymentMethod } from 
 
 const todayIso = () => new Date().toISOString().slice(0, 10)
 
+type Mode = 'single' | 'split' | 'advance'
+
 export function RecordExpense({ onDone }: { onDone: () => void }) {
   const activeCategories = useLiveQuery(async () => (await db.categories.toArray()).filter((c) => c.active), [])
   const balanceQirsh = useLiveQuery(getVaultBalanceQirsh, [])
-  const [splitMode, setSplitMode] = useState(false)
+  const [mode, setMode] = useState<Mode>('single')
 
   const list = activeCategories ?? []
-
-  if (list.length === 0) {
-    return (
-      <div className="space-y-4">
-        <PageTitle>تسجيل مصروف</PageTitle>
-        <Banner kind="info">أضف بند مصروفات واحدًا على الأقل من شاشة "البنود" قبل تسجيل أي مصروف</Banner>
-      </div>
-    )
-  }
+  const noCategories = list.length === 0
 
   return (
     <div className="space-y-4">
@@ -41,26 +36,127 @@ export function RecordExpense({ onDone }: { onDone: () => void }) {
       </Card>
 
       <div className="flex gap-2 bg-slate-100 rounded-xl p-1">
-        <button
-          onClick={() => setSplitMode(false)}
-          className={`flex-1 py-2 rounded-lg text-sm font-semibold transition ${!splitMode ? 'bg-white shadow text-teal-700' : 'text-slate-500'}`}
-        >
-          مصروف على بند واحد
-        </button>
-        <button
-          onClick={() => setSplitMode(true)}
-          className={`flex-1 py-2 rounded-lg text-sm font-semibold transition ${splitMode ? 'bg-white shadow text-teal-700' : 'text-slate-500'}`}
-        >
-          تقسيم على أكتر من بند
-        </button>
+        <ModeButton active={mode === 'single'} onClick={() => setMode('single')}>
+          بند واحد
+        </ModeButton>
+        <ModeButton active={mode === 'split'} onClick={() => setMode('split')}>
+          تقسيم على بنود
+        </ModeButton>
+        <ModeButton active={mode === 'advance'} onClick={() => setMode('advance')}>
+          دفعة بدون بند
+        </ModeButton>
       </div>
 
-      {splitMode ? (
-        <SplitExpenseForm categories={list} balanceQirsh={balanceQirsh} onDone={onDone} />
-      ) : (
-        <SingleExpenseForm categories={list} balanceQirsh={balanceQirsh} onDone={onDone} />
+      {mode !== 'advance' && noCategories && (
+        <Banner kind="info">أضف بند مصروفات واحدًا على الأقل من شاشة "البنود" قبل استخدام هذا الوضع</Banner>
       )}
+      {mode === 'split' && !noCategories && <SplitExpenseForm categories={list} balanceQirsh={balanceQirsh} onDone={onDone} />}
+      {mode === 'single' && !noCategories && <SingleExpenseForm categories={list} balanceQirsh={balanceQirsh} onDone={onDone} />}
+      {mode === 'advance' && <AdvanceForm balanceQirsh={balanceQirsh} onDone={onDone} />}
     </div>
+  )
+}
+
+function ModeButton({
+  active,
+  onClick,
+  disabled,
+  children,
+}: {
+  active: boolean
+  onClick?: () => void
+  disabled?: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className={`flex-1 py-2 rounded-lg text-xs sm:text-sm font-semibold transition disabled:opacity-40 ${
+        active ? 'bg-white shadow text-teal-700' : 'text-slate-500'
+      }`}
+    >
+      {children}
+    </button>
+  )
+}
+
+function AdvanceForm({ balanceQirsh, onDone }: { balanceQirsh: number | undefined; onDone: () => void }) {
+  const [amount, setAmount] = useState('')
+  const [date, setDate] = useState(todayIso())
+  const [description, setDescription] = useState('')
+  const [counterparty, setCounterparty] = useState('')
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('CASH')
+  const [invoiceNumber, setInvoiceNumber] = useState('')
+  const [error, setError] = useState('')
+  const [success, setSuccess] = useState(false)
+
+  const amountQirsh = Number(amount) > 0 ? egpToQirsh(Number(amount)) : 0
+  const willExceed = balanceQirsh !== undefined && amountQirsh > balanceQirsh
+
+  async function submit() {
+    setError('')
+    setSuccess(false)
+    try {
+      await recordAdvance({ amountQirsh, date, description, counterparty, paymentMethod, invoiceNumber })
+      setAmount('')
+      setDescription('')
+      setCounterparty('')
+      setInvoiceNumber('')
+      setSuccess(true)
+    } catch (e) {
+      setError(e instanceof LedgerError ? e.message : 'حدث خطأ غير متوقع')
+    }
+  }
+
+  return (
+    <>
+      {error && <Banner kind="error">{error}</Banner>}
+      {success && (
+        <Banner kind="success">تم تسجيل الدفعة وخصمها من الصندوق. وزّعها على البنود بعدين من تبويب "دفعات تحت التوزيع" بالتقارير</Banner>
+      )}
+      {willExceed && <Banner kind="error">القيمة أكبر من الرصيد المتاح في الصندوق</Banner>}
+
+      <Card>
+        <p className="text-xs text-slate-500 mb-3">
+          لدفعة بتدفعها (مثلاً لمقاول) من غير ما تكون عارف هتتوزع على أنهي بنود لحد ما الشغل يخلص. الفلوس بتتخصم من
+          الصندوق دلوقتي، وتقدر توزعها على البنود الصح بعدين من غير ما الرصيد يتأثر تاني.
+        </p>
+        <Field label="القيمة (ج.م)">
+          <input type="number" inputMode="decimal" className={inputClass} value={amount} onChange={(e) => setAmount(e.target.value)} />
+        </Field>
+        <Field label="التاريخ">
+          <input type="date" className={inputClass} value={date} onChange={(e) => setDate(e.target.value)} />
+        </Field>
+        <Field label="الوصف">
+          <input className={inputClass} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="مثال: دفعة مقدمة للمقاول" />
+        </Field>
+        <Field label="المستفيد (اختياري)">
+          <input className={inputClass} value={counterparty} onChange={(e) => setCounterparty(e.target.value)} />
+        </Field>
+        <Field label="طريقة الدفع">
+          <select className={inputClass} value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)}>
+            {Object.entries(PAYMENT_METHOD_LABELS).map(([k, v]) => (
+              <option key={k} value={k}>
+                {v}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="رقم الفاتورة (اختياري)">
+          <input className={inputClass} value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} />
+        </Field>
+
+        <div className="flex gap-2">
+          <Button className="flex-1" onClick={submit} disabled={amountQirsh <= 0}>
+            تسجيل الدفعة
+          </Button>
+          <Button variant="secondary" onClick={onDone}>
+            رجوع
+          </Button>
+        </div>
+      </Card>
+    </>
   )
 }
 

@@ -55,6 +55,17 @@ export function Dashboard({ onNavigate }: { onNavigate: (tab: string) => void })
         </button>
       )}
 
+      {summary.totalUnallocatedAdvancesQirsh > 0 && (
+        <button onClick={() => onNavigate('reports')} className="w-full text-right">
+          <Card className="bg-sky-50 border-sky-200">
+            <div className="flex justify-between items-center">
+              <span className="text-sm text-sky-700">دفعات لسه مش موزعة على بنود</span>
+              <span className="font-bold text-sky-800 tabular-nums">{formatEGP(summary.totalUnallocatedAdvancesQirsh)}</span>
+            </div>
+          </Card>
+        </button>
+      )}
+
       <Card>
         <h3 className="font-bold text-slate-700 mb-2">أعلى البنود إنفاقًا</h3>
         {summary.topCategories.filter((c) => c.spentQirsh > 0).length === 0 ? (
@@ -83,13 +94,18 @@ export function Dashboard({ onNavigate }: { onNavigate: (tab: string) => void })
               <li key={e.id} className="py-2 text-sm">
                 <div className="flex justify-between">
                   <span className="text-slate-700">{e.description}</span>
-                  <span className={`font-semibold tabular-nums ${signedAmount(e) >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                    {signedAmount(e) >= 0 ? '+' : '-'}
-                    {formatEGP(e.amountQirsh)}
-                  </span>
+                  {e.affectsVault === false ? (
+                    <span className="font-semibold tabular-nums text-sky-600">{formatEGP(e.amountQirsh)}</span>
+                  ) : (
+                    <span className={`font-semibold tabular-nums ${signedAmount(e) >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                      {signedAmount(e) >= 0 ? '+' : '-'}
+                      {formatEGP(e.amountQirsh)}
+                    </span>
+                  )}
                 </div>
                 <div className="text-xs text-slate-400 mt-0.5">
                   {e.date} {e.paymentMethod ? `· ${PAYMENT_METHOD_LABELS[e.paymentMethod]}` : ''}
+                  {e.affectsVault === false && ' · توزيع من دفعة سابقة (من غير خصم جديد)'}
                   {e.reversed && ' · (ملغاة)'}
                   {e.reversalOfId && ' · حركة إلغاء'}
                 </div>
