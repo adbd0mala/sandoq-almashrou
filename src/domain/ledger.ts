@@ -478,6 +478,116 @@ export async function settlePayable(input: SettlePayableInput): Promise<LedgerEn
   )
 }
 
+export interface RecordSplitExpenseWithPayableInput {
+  date: string
+  description: string
+  /** Required — a payable needs someone to owe. */
+  counterparty: string
+  paymentMethod?: PaymentMethod
+  invoiceNumber?: string
+  /** Total cash paid now, across every line combined. Distributed across
+   * lines proportional to each line's own totalQirsh (same largest-remainder
+   * method used for funder allocation), so partly-paid cement split 3 ways
+   * leaves each بند with its own fair share already paid and its own
+   * independent payable for the rest. */
+  paidNowQirsh: number
+  /** Each line's totalQirsh is its full invoice share (not just what's paid). */
+  lines: { categoryId: string; totalQirsh: number; note?: string }[]
+}
+
+/** Combines recordSplitExpense + recordExpenseWithPayable: one purchase,
+ * split across several بنود, with only part of the combined total paid now.
+ * Each line gets its own ledger entry for its paid portion and — if its
+ * share isn't fully paid — its own independent Payable, so settling one
+ * بند's remaining debt later doesn't touch the others. */
+export async function recordSplitExpenseWithPayable(
+  input: RecordSplitExpenseWithPayableInput,
+): Promise<{ entries: LedgerEntry[]; payables: Payable[] }> {
+  if (input.lines.length < 2) {
+    throw new LedgerError('أدخل بندين على الأقل للتقسيم. لبند واحد استخدم تسجيل مصروف عادي')
+  }
+  if (input.lines.some((l) => l.totalQirsh <= 0)) {
+    throw new LedgerError('قيمة كل بند في التقسيم يجب أن تكون أكبر من صفر')
+  }
+  if (!input.counterparty?.trim()) throw new LedgerError('اسم المورد مطلوب لتسجيل فاتورة بدفعة جزئية')
+  const supplierName = input.counterparty.trim()
+
+  const grandTotalQirsh = input.lines.reduce((s, l) => s + l.totalQirsh, 0)
+  if (input.paidNowQirsh < 0) throw new LedgerError('قيمة المدفوع الآن لا يمكن أن تكون بالسالب')
+  if (input.paidNowQirsh > grandTotalQirsh) {
+    throw new LedgerError('المبلغ المدفوع الآن لا يمكن أن يكون أكبر من إجمالي قيمة الفاتورة')
+  }
+
+  const baseDescription = input.description.trim() || 'مصروف'
+
+  return db.transaction('rw', [db.ledger, db.categories, db.funders, db.allocations, db.settings, db.payables], async () => {
+    const activeFunders = await checkCanSpend(input.paidNowQirsh)
+
+    const paidSplit = splitProportionally(
+      input.paidNowQirsh,
+      input.lines.map((l, idx) => ({ key: String(idx), percent: l.totalQirsh })),
+    )
+
+    const entries: LedgerEntry[] = []
+    const payables: Payable[] = []
+
+    for (let idx = 0; idx < input.lines.length; idx++) {
+      const line = input.lines[idx]
+      const paidForLine = paidSplit.find((s) => s.key === String(idx))!.amountQirsh
+      const description = line.note?.trim() ? `${baseDescription} — ${line.note.trim()}` : baseDescription
+
+      let entry: LedgerEntry
+      if (paidForLine > 0) {
+        entry = await insertExpenseEntry(
+          {
+            categoryId: line.categoryId,
+            amountQirsh: paidForLine,
+            date: input.date,
+            description,
+            counterparty: supplierName,
+            paymentMethod: input.paymentMethod,
+            invoiceNumber: input.invoiceNumber,
+          },
+          activeFunders,
+        )
+      } else {
+        entry = {
+          id: newId(),
+          type: 'EXPENSE',
+          date: input.date,
+          amountQirsh: 0,
+          description,
+          counterparty: supplierName,
+          paymentMethod: input.paymentMethod,
+          invoiceNumber: input.invoiceNumber?.trim() || undefined,
+          categoryId: line.categoryId,
+          createdAt: new Date().toISOString(),
+        }
+        await db.ledger.add(entry)
+      }
+      entries.push(entry)
+
+      const remainingForLine = line.totalQirsh - paidForLine
+      if (remainingForLine > 0) {
+        const payable: Payable = {
+          id: newId(),
+          categoryId: line.categoryId,
+          supplierName,
+          totalQirsh: line.totalQirsh,
+          date: input.date,
+          description,
+          originLedgerEntryId: entry.id,
+          createdAt: new Date().toISOString(),
+        }
+        await db.payables.add(payable)
+        payables.push(payable)
+      }
+    }
+
+    return { entries, payables }
+  })
+}
+
 export async function reverseEntry(entryId: string, reason: string): Promise<LedgerEntry> {
   if (!reason.trim()) throw new LedgerError('سبب الإلغاء مطلوب')
 

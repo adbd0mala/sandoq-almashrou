@@ -1,7 +1,14 @@
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useState } from 'react'
 import { db } from '../db/db'
-import { LedgerError, getVaultBalanceQirsh, recordExpense, recordExpenseWithPayable, recordSplitExpense } from '../domain/ledger'
+import {
+  LedgerError,
+  getVaultBalanceQirsh,
+  recordExpense,
+  recordExpenseWithPayable,
+  recordSplitExpense,
+  recordSplitExpenseWithPayable,
+} from '../domain/ledger'
 import { egpToQirsh, formatEGP } from '../domain/money'
 import { Banner, Button, Card, Field, PageTitle, inputClass } from '../components/ui'
 import { PAYMENT_METHOD_LABELS, type ExpenseCategory, type PaymentMethod } from '../domain/types'
@@ -221,8 +228,10 @@ function SplitExpenseForm({
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('CASH')
   const [invoiceNumber, setInvoiceNumber] = useState('')
   const [lines, setLines] = useState<SplitLine[]>([newLine(), newLine()])
+  const [isPartial, setIsPartial] = useState(false)
+  const [paidNow, setPaidNow] = useState('')
   const [error, setError] = useState('')
-  const [success, setSuccess] = useState(false)
+  const [success, setSuccess] = useState<string | null>(null)
 
   function updateLine(key: string, patch: Partial<SplitLine>) {
     setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)))
@@ -232,27 +241,51 @@ function SplitExpenseForm({
   }
 
   const validLines = lines.filter((l) => l.categoryId && Number(l.amount) > 0)
+  // In partial mode, each line's amount is its full invoice share, not what's paid.
   const totalQirsh = validLines.reduce((s, l) => s + egpToQirsh(Number(l.amount)), 0)
-  const canSubmit = validLines.length >= 2 && validLines.length === lines.length
-  const willExceed = balanceQirsh !== undefined && totalQirsh > balanceQirsh
+  const paidNowQirsh = isPartial ? (Number(paidNow) > 0 ? egpToQirsh(Number(paidNow)) : 0) : totalQirsh
+  const remainingQirsh = totalQirsh - paidNowQirsh
+
+  const canSubmit = isPartial
+    ? validLines.length >= 2 && validLines.length === lines.length && !!counterparty.trim() && paidNowQirsh >= 0 && paidNowQirsh <= totalQirsh
+    : validLines.length >= 2 && validLines.length === lines.length
+  const willExceed = balanceQirsh !== undefined && paidNowQirsh > balanceQirsh
 
   async function submit() {
     setError('')
-    setSuccess(false)
+    setSuccess(null)
     try {
-      await recordSplitExpense({
-        date,
-        description,
-        counterparty,
-        paymentMethod,
-        invoiceNumber,
-        lines: lines.map((l) => ({ categoryId: l.categoryId, amountQirsh: egpToQirsh(Number(l.amount)), note: l.note })),
-      })
+      if (isPartial) {
+        const { payables } = await recordSplitExpenseWithPayable({
+          date,
+          description,
+          counterparty,
+          paymentMethod,
+          invoiceNumber,
+          paidNowQirsh,
+          lines: lines.map((l) => ({ categoryId: l.categoryId, totalQirsh: egpToQirsh(Number(l.amount)), note: l.note })),
+        })
+        setSuccess(
+          payables.length > 0
+            ? `تم التسجيل. باقي على ${counterparty.trim()} في ${payables.length} بند — موجود في تبويب "المستحقات" بالتقارير`
+            : 'تم تسجيل كل بنود المصروف بالكامل (مفيش باقي للمورد)',
+        )
+        setPaidNow('')
+      } else {
+        await recordSplitExpense({
+          date,
+          description,
+          counterparty,
+          paymentMethod,
+          invoiceNumber,
+          lines: lines.map((l) => ({ categoryId: l.categoryId, amountQirsh: egpToQirsh(Number(l.amount)), note: l.note })),
+        })
+        setSuccess('تم تسجيل كل بنود المصروف بنجاح (حركة مستقلة لكل بند)')
+      }
       setLines([newLine(), newLine()])
       setDescription('')
       setCounterparty('')
       setInvoiceNumber('')
-      setSuccess(true)
     } catch (e) {
       setError(e instanceof LedgerError ? e.message : 'حدث خطأ غير متوقع')
     }
@@ -261,8 +294,8 @@ function SplitExpenseForm({
   return (
     <>
       {error && <Banner kind="error">{error}</Banner>}
-      {success && <Banner kind="success">تم تسجيل كل بنود المصروف بنجاح (حركة مستقلة لكل بند)</Banner>}
-      {willExceed && <Banner kind="error">إجمالي قيم البنود أكبر من الرصيد المتاح في الصندوق</Banner>}
+      {success && <Banner kind="success">{success}</Banner>}
+      {willExceed && <Banner kind="error">القيمة المدفوعة الآن أكبر من الرصيد المتاح في الصندوق</Banner>}
 
       <Card>
         <p className="text-xs text-slate-500 mb-3">
@@ -274,7 +307,13 @@ function SplitExpenseForm({
         <Field label="التاريخ">
           <input type="date" className={inputClass} value={date} onChange={(e) => setDate(e.target.value)} />
         </Field>
-        <Field label="المورد / المستفيد (اختياري)">
+
+        <label className="flex items-center justify-between py-2 mb-1 border-y border-slate-100">
+          <span className="text-sm text-slate-600">دفعة جزئية (ولسه فيه باقي للمورد)</span>
+          <input type="checkbox" checked={isPartial} onChange={(e) => setIsPartial(e.target.checked)} className="w-5 h-5" />
+        </label>
+
+        <Field label={isPartial ? 'اسم المورد' : 'المورد / المستفيد (اختياري)'}>
           <input className={inputClass} value={counterparty} onChange={(e) => setCounterparty(e.target.value)} />
         </Field>
         <Field label="طريقة الدفع">
@@ -292,7 +331,7 @@ function SplitExpenseForm({
       </Card>
 
       <Card>
-        <h3 className="font-bold text-slate-700 mb-2">البنود</h3>
+        <h3 className="font-bold text-slate-700 mb-2">البنود {isPartial && <span className="text-xs text-slate-400 font-normal">(القيمة هنا = إجمالي كل بند، مش بس المدفوع)</span>}</h3>
         <div className="space-y-3">
           {lines.map((line, idx) => (
             <div key={line.key} className="border border-slate-200 rounded-xl p-3">
@@ -320,7 +359,7 @@ function SplitExpenseForm({
                 <input
                   type="number"
                   inputMode="decimal"
-                  placeholder="القيمة (ج.م)"
+                  placeholder={isPartial ? 'إجمالي البند (ج.م)' : 'القيمة (ج.م)'}
                   className={inputClass}
                   value={line.amount}
                   onChange={(e) => updateLine(line.key, { amount: e.target.value })}
@@ -341,13 +380,26 @@ function SplitExpenseForm({
         </Button>
 
         <div className="flex justify-between items-center mt-4 pt-3 border-t">
-          <span className="text-sm text-slate-500">الإجمالي</span>
+          <span className="text-sm text-slate-500">إجمالي كل البنود</span>
           <span className="text-lg font-bold text-slate-800 tabular-nums">{formatEGP(totalQirsh)}</span>
         </div>
 
+        {isPartial && (
+          <>
+            <Field label="المدفوع الآن من الإجمالي (ج.م)">
+              <input type="number" inputMode="decimal" className={inputClass} value={paidNow} onChange={(e) => setPaidNow(e.target.value)} />
+            </Field>
+            {totalQirsh > 0 && (
+              <div className={`text-sm mb-1 font-semibold ${remainingQirsh < 0 ? 'text-red-600' : 'text-amber-600'}`}>
+                {remainingQirsh < 0 ? 'المدفوع أكبر من إجمالي البنود' : `الباقي للمورد: ${(remainingQirsh / 100).toFixed(2)} ج.م (بيتوزع على البنود بنفس نسبتها)`}
+              </div>
+            )}
+          </>
+        )}
+
         <div className="flex gap-2 mt-3">
           <Button className="flex-1" onClick={submit} disabled={!canSubmit}>
-            تسجيل كل البنود
+            {isPartial ? 'تسجيل الفاتورة والدفعة' : 'تسجيل كل البنود'}
           </Button>
           <Button variant="secondary" onClick={onDone}>
             رجوع
