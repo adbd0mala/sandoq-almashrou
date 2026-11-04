@@ -210,58 +210,124 @@ export interface RecordExpenseInput {
   invoiceNumber?: string
 }
 
+/** Inserts one EXPENSE ledger entry + its per-funder allocation. Assumes it
+ * already runs inside an open Dexie transaction covering ledger/allocations
+ * — callers (recordExpense, recordSplitExpense) own the transaction and the
+ * balance/shares checks, so a multi-line split stays atomic as one unit. */
+async function insertExpenseEntry(input: RecordExpenseInput, activeFunders: Funder[]): Promise<LedgerEntry> {
+  const category = await db.categories.get(input.categoryId)
+  if (!category || !category.active) throw new LedgerError('بند المصروف غير موجود أو مؤرشف')
+
+  const entry: LedgerEntry = {
+    id: newId(),
+    type: 'EXPENSE',
+    date: input.date,
+    amountQirsh: input.amountQirsh,
+    description: input.description.trim() || 'مصروف',
+    counterparty: input.counterparty?.trim() || undefined,
+    paymentMethod: input.paymentMethod,
+    invoiceNumber: input.invoiceNumber?.trim() || undefined,
+    categoryId: input.categoryId,
+    createdAt: new Date().toISOString(),
+  }
+  await db.ledger.add(entry)
+
+  const split = splitProportionally(
+    input.amountQirsh,
+    activeFunders.map((f) => ({ key: f.id, percent: f.sharePercent })),
+  )
+  for (const s of split) {
+    const funder = activeFunders.find((f) => f.id === s.key)!
+    await db.allocations.add({
+      id: newId(),
+      ledgerEntryId: entry.id,
+      funderId: s.key,
+      sharePercentApplied: funder.sharePercent,
+      amountQirsh: s.amountQirsh,
+    })
+  }
+
+  return entry
+}
+
+/** Shared pre-checks for posting expense money: funders configured with
+ * valid shares, and enough balance (unless overdraft is allowed) for the
+ * total amount about to leave the vault. */
+async function checkCanSpend(totalQirsh: number): Promise<Funder[]> {
+  const settings = await ensureSettings()
+  const balance = await getVaultBalanceQirsh()
+  if (!settings.allowOverdraft && totalQirsh > balance) {
+    throw new LedgerError(
+      `الرصيد غير كافٍ. الرصيد الحالي ${(balance / 100).toFixed(2)} ج.م وقيمة المصروف ${(totalQirsh / 100).toFixed(2)} ج.م`,
+    )
+  }
+
+  const activeFunders = await listActiveFunders()
+  if (activeFunders.length === 0) throw new LedgerError('لا يوجد ممولون نشطون لتوزيع المصروف عليهم')
+  const shareSum = activeFunders.reduce((s, f) => s + f.sharePercent, 0)
+  if (Math.abs(shareSum - 100) > SHARE_TOLERANCE) {
+    throw new LedgerError(`نسب تحمل المصروفات الحالية غير مكتملة (الإجمالي ${shareSum.toFixed(2)}%). راجع شاشة الممولين`)
+  }
+  return activeFunders
+}
+
 export async function recordExpense(input: RecordExpenseInput): Promise<LedgerEntry> {
   if (input.amountQirsh <= 0) throw new LedgerError('قيمة المصروف يجب أن تكون أكبر من صفر')
 
   return db.transaction('rw', [db.ledger, db.categories, db.funders, db.allocations, db.settings], async () => {
-    const category = await db.categories.get(input.categoryId)
-    if (!category || !category.active) throw new LedgerError('بند المصروف غير موجود أو مؤرشف')
+    const activeFunders = await checkCanSpend(input.amountQirsh)
+    return insertExpenseEntry(input, activeFunders)
+  })
+}
 
-    const settings = await ensureSettings()
-    const balance = await getVaultBalanceQirsh()
-    if (!settings.allowOverdraft && input.amountQirsh > balance) {
-      throw new LedgerError(
-        `الرصيد غير كافٍ. الرصيد الحالي ${(balance / 100).toFixed(2)} ج.م وقيمة المصروف ${(input.amountQirsh / 100).toFixed(2)} ج.م`,
+export interface RecordSplitExpenseInput {
+  date: string
+  description: string
+  counterparty?: string
+  paymentMethod?: PaymentMethod
+  invoiceNumber?: string
+  /** Each line becomes its own independent EXPENSE ledger entry (its own id,
+   * reversible on its own), sharing the same date/supplier/invoice/payment
+   * method. The vault/overdraft check runs once against the combined total,
+   * so the whole split posts or fails together. */
+  lines: { categoryId: string; amountQirsh: number; note?: string }[]
+}
+
+/** Records one payment split across several expense categories — e.g. 6
+ * tons of cement bought in one purchase, 2 tons charged to each of three
+ * بنود. Each line is inserted via insertExpenseEntry as its own ledger
+ * entry, so later it can be individually reversed without touching the
+ * other lines, while the balance/overdraft check covers the full amount. */
+export async function recordSplitExpense(input: RecordSplitExpenseInput): Promise<LedgerEntry[]> {
+  if (input.lines.length < 2) {
+    throw new LedgerError('أدخل بندين على الأقل للتقسيم. لبند واحد استخدم تسجيل مصروف عادي')
+  }
+  if (input.lines.some((l) => l.amountQirsh <= 0)) {
+    throw new LedgerError('قيمة كل بند في التقسيم يجب أن تكون أكبر من صفر')
+  }
+  const totalQirsh = input.lines.reduce((s, l) => s + l.amountQirsh, 0)
+  const baseDescription = input.description.trim() || 'مصروف'
+
+  return db.transaction('rw', [db.ledger, db.categories, db.funders, db.allocations, db.settings], async () => {
+    const activeFunders = await checkCanSpend(totalQirsh)
+
+    const entries: LedgerEntry[] = []
+    for (const line of input.lines) {
+      const entry = await insertExpenseEntry(
+        {
+          categoryId: line.categoryId,
+          amountQirsh: line.amountQirsh,
+          date: input.date,
+          description: line.note?.trim() ? `${baseDescription} — ${line.note.trim()}` : baseDescription,
+          counterparty: input.counterparty,
+          paymentMethod: input.paymentMethod,
+          invoiceNumber: input.invoiceNumber,
+        },
+        activeFunders,
       )
+      entries.push(entry)
     }
-
-    const activeFunders = await listActiveFunders()
-    if (activeFunders.length === 0) throw new LedgerError('لا يوجد ممولون نشطون لتوزيع المصروف عليهم')
-    const shareSum = activeFunders.reduce((s, f) => s + f.sharePercent, 0)
-    if (Math.abs(shareSum - 100) > SHARE_TOLERANCE) {
-      throw new LedgerError(`نسب تحمل المصروفات الحالية غير مكتملة (الإجمالي ${shareSum.toFixed(2)}%). راجع شاشة الممولين`)
-    }
-
-    const entry: LedgerEntry = {
-      id: newId(),
-      type: 'EXPENSE',
-      date: input.date,
-      amountQirsh: input.amountQirsh,
-      description: input.description.trim() || 'مصروف',
-      counterparty: input.counterparty?.trim() || undefined,
-      paymentMethod: input.paymentMethod,
-      invoiceNumber: input.invoiceNumber?.trim() || undefined,
-      categoryId: input.categoryId,
-      createdAt: new Date().toISOString(),
-    }
-    await db.ledger.add(entry)
-
-    const split = splitProportionally(
-      input.amountQirsh,
-      activeFunders.map((f) => ({ key: f.id, percent: f.sharePercent })),
-    )
-    for (const s of split) {
-      const funder = activeFunders.find((f) => f.id === s.key)!
-      await db.allocations.add({
-        id: newId(),
-        ledgerEntryId: entry.id,
-        funderId: s.key,
-        sharePercentApplied: funder.sharePercent,
-        amountQirsh: s.amountQirsh,
-      })
-    }
-
-    return entry
+    return entries
   })
 }
 
