@@ -5,6 +5,8 @@ import type {
   ExpenseCategory,
   Funder,
   LedgerEntry,
+  Payable,
+  PayableSettlement,
   Settings,
 } from '../domain/types'
 
@@ -15,6 +17,8 @@ export class AppDatabase extends Dexie {
   allocations!: Table<ExpenseAllocation, string>
   settings!: Table<Settings, string>
   backups!: Table<BackupSnapshot, string>
+  payables!: Table<Payable, string>
+  payableSettlements!: Table<PayableSettlement, string>
 
   constructor() {
     super('pfems-vault')
@@ -25,6 +29,12 @@ export class AppDatabase extends Dexie {
       allocations: 'id, ledgerEntryId, funderId',
       settings: 'id',
       backups: 'id, createdAt, kind',
+    })
+    // v2: supplier payables (partial payments — pay part now, owe the rest).
+    // Existing tables/data are untouched; only new empty tables are added.
+    this.version(2).stores({
+      payables: 'id, categoryId, originLedgerEntryId, createdAt',
+      payableSettlements: 'id, payableId, ledgerEntryId',
     })
   }
 }

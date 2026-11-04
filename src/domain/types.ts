@@ -67,3 +67,28 @@ export interface BackupSnapshot {
   payload: string // JSON.stringify of the full export
   sizeBytes: number
 }
+
+/** A supplier invoice that wasn't fully paid up front. Created alongside the
+ * partial-payment EXPENSE entry (originLedgerEntryId); "paid so far" and
+ * "remaining" are always derived from that entry + its settlements' signed
+ * amounts, never stored, so a reversal anywhere stays automatically correct. */
+export interface Payable {
+  id: string
+  categoryId: string
+  supplierName: string
+  totalQirsh: number
+  date: string
+  description: string
+  originLedgerEntryId: string
+  createdAt: string
+}
+
+/** One further payment against an open Payable. The actual cash movement is
+ * the linked EXPENSE ledger entry (ledgerEntryId) — this row just links that
+ * entry back to the payable it's settling. */
+export interface PayableSettlement {
+  id: string
+  payableId: string
+  ledgerEntryId: string
+  createdAt: string
+}

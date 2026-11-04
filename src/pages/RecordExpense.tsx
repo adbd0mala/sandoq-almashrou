@@ -1,7 +1,7 @@
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useState } from 'react'
 import { db } from '../db/db'
-import { LedgerError, getVaultBalanceQirsh, recordExpense, recordSplitExpense } from '../domain/ledger'
+import { LedgerError, getVaultBalanceQirsh, recordExpense, recordExpenseWithPayable, recordSplitExpense } from '../domain/ledger'
 import { egpToQirsh, formatEGP } from '../domain/money'
 import { Banner, Button, Card, Field, PageTitle, inputClass } from '../components/ui'
 import { PAYMENT_METHOD_LABELS, type ExpenseCategory, type PaymentMethod } from '../domain/types'
@@ -73,22 +73,49 @@ function SingleExpenseForm({
   const [counterparty, setCounterparty] = useState('')
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('CASH')
   const [invoiceNumber, setInvoiceNumber] = useState('')
+  const [isPartial, setIsPartial] = useState(false)
+  const [totalInvoice, setTotalInvoice] = useState('')
   const [error, setError] = useState('')
-  const [success, setSuccess] = useState(false)
+  const [success, setSuccess] = useState<string | null>(null)
 
   const amountQirsh = Number(amount) > 0 ? egpToQirsh(Number(amount)) : 0
+  const totalQirsh = Number(totalInvoice) > 0 ? egpToQirsh(Number(totalInvoice)) : 0
   const willExceed = balanceQirsh !== undefined && amountQirsh > balanceQirsh
+  const remainingQirsh = isPartial ? totalQirsh - amountQirsh : 0
+
+  const canSubmit = isPartial
+    ? !!categoryId && !!counterparty.trim() && totalQirsh > 0 && amountQirsh >= 0 && amountQirsh <= totalQirsh
+    : !!categoryId && amountQirsh > 0
 
   async function submit() {
     setError('')
-    setSuccess(false)
+    setSuccess(null)
     try {
-      await recordExpense({ categoryId, amountQirsh, date, description, counterparty, paymentMethod, invoiceNumber })
+      if (isPartial) {
+        const { payable } = await recordExpenseWithPayable({
+          categoryId,
+          amountQirsh,
+          totalQirsh,
+          date,
+          description,
+          counterparty,
+          paymentMethod,
+          invoiceNumber,
+        })
+        setSuccess(
+          payable
+            ? `تم التسجيل. باقي على ${counterparty.trim()}: ${(payable.totalQirsh - amountQirsh > 0 ? ((totalQirsh - amountQirsh) / 100).toFixed(2) : '0.00')} ج.م — موجود في تبويب "المستحقات" بالتقارير`
+            : 'تم تسجيل المصروف بالكامل (مفيش باقي للمورد)',
+        )
+        setTotalInvoice('')
+      } else {
+        await recordExpense({ categoryId, amountQirsh, date, description, counterparty, paymentMethod, invoiceNumber })
+        setSuccess('تم تسجيل المصروف بنجاح')
+      }
       setAmount('')
       setDescription('')
       setCounterparty('')
       setInvoiceNumber('')
-      setSuccess(true)
     } catch (e) {
       setError(e instanceof LedgerError ? e.message : 'حدث خطأ غير متوقع')
     }
@@ -97,8 +124,8 @@ function SingleExpenseForm({
   return (
     <>
       {error && <Banner kind="error">{error}</Banner>}
-      {success && <Banner kind="success">تم تسجيل المصروف بنجاح</Banner>}
-      {willExceed && <Banner kind="error">قيمة المصروف أكبر من الرصيد المتاح في الصندوق</Banner>}
+      {success && <Banner kind="success">{success}</Banner>}
+      {willExceed && <Banner kind="error">القيمة المدفوعة الآن أكبر من الرصيد المتاح في الصندوق</Banner>}
 
       <Card>
         <Field label="البند">
@@ -111,16 +138,35 @@ function SingleExpenseForm({
             ))}
           </select>
         </Field>
-        <Field label="القيمة (ج.م)">
+
+        <label className="flex items-center justify-between py-2 mb-1 border-y border-slate-100">
+          <span className="text-sm text-slate-600">دفعة جزئية (ولسه فيه باقي للمورد)</span>
+          <input type="checkbox" checked={isPartial} onChange={(e) => setIsPartial(e.target.checked)} className="w-5 h-5" />
+        </label>
+
+        {isPartial && (
+          <Field label="إجمالي قيمة الفاتورة (ج.م)">
+            <input type="number" inputMode="decimal" className={inputClass} value={totalInvoice} onChange={(e) => setTotalInvoice(e.target.value)} />
+          </Field>
+        )}
+
+        <Field label={isPartial ? 'المدفوع الآن (ج.م)' : 'القيمة (ج.م)'}>
           <input type="number" inputMode="decimal" className={inputClass} value={amount} onChange={(e) => setAmount(e.target.value)} />
         </Field>
+
+        {isPartial && totalQirsh > 0 && (
+          <div className={`text-sm mb-3 font-semibold ${remainingQirsh < 0 ? 'text-red-600' : 'text-amber-600'}`}>
+            {remainingQirsh < 0 ? 'المدفوع أكبر من إجمالي الفاتورة' : `الباقي للمورد: ${(remainingQirsh / 100).toFixed(2)} ج.م`}
+          </div>
+        )}
+
         <Field label="تاريخ المصروف">
           <input type="date" className={inputClass} value={date} onChange={(e) => setDate(e.target.value)} />
         </Field>
         <Field label="الوصف">
           <input className={inputClass} value={description} onChange={(e) => setDescription(e.target.value)} />
         </Field>
-        <Field label="المورد / المستفيد (اختياري)">
+        <Field label={isPartial ? 'اسم المورد' : 'المورد / المستفيد (اختياري)'}>
           <input className={inputClass} value={counterparty} onChange={(e) => setCounterparty(e.target.value)} />
         </Field>
         <Field label="طريقة الدفع">
@@ -137,8 +183,8 @@ function SingleExpenseForm({
         </Field>
 
         <div className="flex gap-2">
-          <Button className="flex-1" onClick={submit} disabled={!categoryId || amountQirsh <= 0}>
-            تسجيل المصروف
+          <Button className="flex-1" onClick={submit} disabled={!canSubmit}>
+            {isPartial ? 'تسجيل الفاتورة والدفعة' : 'تسجيل المصروف'}
           </Button>
           <Button variant="secondary" onClick={onDone}>
             رجوع

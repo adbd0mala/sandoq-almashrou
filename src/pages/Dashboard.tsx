@@ -44,6 +44,17 @@ export function Dashboard({ onNavigate }: { onNavigate: (tab: string) => void })
         </Card>
       </div>
 
+      {summary.totalPayablesQirsh > 0 && (
+        <button onClick={() => onNavigate('reports')} className="w-full text-right">
+          <Card className="bg-amber-50 border-amber-200">
+            <div className="flex justify-between items-center">
+              <span className="text-sm text-amber-700">مستحقات مفتوحة لموردين</span>
+              <span className="font-bold text-amber-800 tabular-nums">{formatEGP(summary.totalPayablesQirsh)}</span>
+            </div>
+          </Card>
+        </button>
+      )}
+
       <Card>
         <h3 className="font-bold text-slate-700 mb-2">أعلى البنود إنفاقًا</h3>
         {summary.topCategories.filter((c) => c.spentQirsh > 0).length === 0 ? (

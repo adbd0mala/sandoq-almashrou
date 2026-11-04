@@ -6,16 +6,19 @@ import {
   getCategoryStatement,
   getFunderStatement,
   getDashboardSummary,
+  listOpenPayables,
   reverseEntry,
+  settlePayable,
   signedAmount,
   type CategoryStatement,
   type FunderStatement,
+  type PayableStatus,
 } from '../domain/ledger'
-import { formatEGP } from '../domain/money'
-import { Button, Card, EmptyState, PageTitle, inputClass } from '../components/ui'
-import { PAYMENT_METHOD_LABELS, type LedgerEntry } from '../domain/types'
+import { egpToQirsh, formatEGP } from '../domain/money'
+import { Banner, Button, Card, EmptyState, Field, PageTitle, inputClass } from '../components/ui'
+import { PAYMENT_METHOD_LABELS, type LedgerEntry, type PaymentMethod } from '../domain/types'
 
-type Tab = 'full' | 'funder' | 'category'
+type Tab = 'full' | 'funder' | 'category' | 'payables'
 
 // xlsx / jspdf / html2canvas are heavy — load them only when an export button
 // is actually pressed instead of bloating the app's initial bundle.
@@ -28,7 +31,7 @@ export function Reports({ initialCategoryId }: { initialCategoryId?: string }) {
   return (
     <div className="space-y-4">
       <PageTitle>التقارير</PageTitle>
-      <div className="flex gap-2 bg-slate-100 rounded-xl p-1">
+      <div className="grid grid-cols-2 gap-2 bg-slate-100 rounded-xl p-1">
         <TabButton active={tab === 'full'} onClick={() => setTab('full')}>
           تقرير شامل
         </TabButton>
@@ -38,11 +41,15 @@ export function Reports({ initialCategoryId }: { initialCategoryId?: string }) {
         <TabButton active={tab === 'category'} onClick={() => setTab('category')}>
           كشف بند
         </TabButton>
+        <TabButton active={tab === 'payables'} onClick={() => setTab('payables')}>
+          المستحقات للموردين
+        </TabButton>
       </div>
 
       {tab === 'full' && <FullProjectReport />}
       {tab === 'funder' && <FunderReport />}
       {tab === 'category' && <CategoryReport initialCategoryId={initialCategoryId} />}
+      {tab === 'payables' && <PayablesReport />}
     </div>
   )
 }
@@ -378,6 +385,108 @@ function CategoryReport({ initialCategoryId }: { initialCategoryId?: string }) {
           </div>
         </Card>
       )}
+    </div>
+  )
+}
+
+function PayablesReport() {
+  const payables = useLiveQuery(listOpenPayables, [])
+  const [settling, setSettling] = useState<PayableStatus | null>(null)
+
+  if (!payables) return null
+
+  if (payables.length === 0) {
+    return (
+      <Card>
+        <EmptyState>مفيش مستحقات مفتوحة لموردين دلوقتي. لما تسجّل مصروف بدفعة جزئية هيظهر هنا</EmptyState>
+      </Card>
+    )
+  }
+
+  const totalRemaining = payables.reduce((s, p) => s + p.remainingQirsh, 0)
+
+  return (
+    <div className="space-y-3">
+      <Card className="bg-amber-50 border-amber-200">
+        <div className="text-sm text-amber-700">إجمالي المستحق لكل الموردين</div>
+        <div className="text-xl font-bold text-amber-800">{formatEGP(totalRemaining)}</div>
+      </Card>
+
+      {payables.map((p) => (
+        <Card key={p.payable.id}>
+          <div className="flex justify-between items-start">
+            <div>
+              <div className="font-semibold text-slate-800">{p.payable.supplierName}</div>
+              <div className="text-xs text-slate-400">{p.payable.description} · {p.payable.date}</div>
+            </div>
+            <span className="text-amber-700 font-bold tabular-nums">{formatEGP(p.remainingQirsh)}</span>
+          </div>
+          <div className="text-xs text-slate-500 mt-2">
+            إجمالي الفاتورة: {formatEGP(p.payable.totalQirsh)} · المدفوع: {formatEGP(p.paidQirsh)}
+          </div>
+          <Button variant="secondary" className="w-full mt-3" onClick={() => setSettling(p)}>
+            سداد جزء أو كل الباقي
+          </Button>
+        </Card>
+      ))}
+
+      {settling && <SettlePayableModal status={settling} onClose={() => setSettling(null)} />}
+    </div>
+  )
+}
+
+function SettlePayableModal({ status, onClose }: { status: PayableStatus; onClose: () => void }) {
+  const [amount, setAmount] = useState(String(status.remainingQirsh / 100))
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10))
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('CASH')
+  const [invoiceNumber, setInvoiceNumber] = useState('')
+  const [error, setError] = useState('')
+
+  const amountQirsh = Number(amount) > 0 ? egpToQirsh(Number(amount)) : 0
+
+  async function submit() {
+    setError('')
+    try {
+      await settlePayable({ payableId: status.payable.id, amountQirsh, date, paymentMethod, invoiceNumber })
+      onClose()
+    } catch (e) {
+      setError(e instanceof LedgerError ? e.message : 'حدث خطأ غير متوقع')
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md p-4 pb-6" onClick={(e) => e.stopPropagation()}>
+        <h2 className="font-bold text-lg text-slate-800 mb-3">سداد مستحق: {status.payable.supplierName}</h2>
+        {error && <Banner kind="error">{error}</Banner>}
+        <div className="text-sm text-slate-500 mb-3">المتبقي حاليًا: {formatEGP(status.remainingQirsh)}</div>
+        <Field label="قيمة السداد (ج.م)">
+          <input type="number" inputMode="decimal" className={inputClass} value={amount} onChange={(e) => setAmount(e.target.value)} />
+        </Field>
+        <Field label="التاريخ">
+          <input type="date" className={inputClass} value={date} onChange={(e) => setDate(e.target.value)} />
+        </Field>
+        <Field label="طريقة الدفع">
+          <select className={inputClass} value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)}>
+            {Object.entries(PAYMENT_METHOD_LABELS).map(([k, v]) => (
+              <option key={k} value={k}>
+                {v}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="رقم الفاتورة (اختياري)">
+          <input className={inputClass} value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} />
+        </Field>
+        <div className="flex gap-2">
+          <Button className="flex-1" onClick={submit} disabled={amountQirsh <= 0 || amountQirsh > status.remainingQirsh}>
+            تأكيد السداد
+          </Button>
+          <Button variant="secondary" onClick={onClose}>
+            إلغاء
+          </Button>
+        </div>
+      </div>
     </div>
   )
 }

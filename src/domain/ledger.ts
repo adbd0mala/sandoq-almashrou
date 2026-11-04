@@ -1,5 +1,5 @@
 import { db, ensureSettings, newId } from '../db/db'
-import type { ExpenseCategory, Funder, LedgerEntry, PaymentMethod } from './types'
+import type { ExpenseCategory, Funder, LedgerEntry, Payable, PaymentMethod } from './types'
 import { splitProportionally } from './money'
 
 export class LedgerError extends Error {}
@@ -331,6 +331,153 @@ export async function recordSplitExpense(input: RecordSplitExpenseInput): Promis
   })
 }
 
+// ---------------------------------------------------------------------------
+// Supplier payables — buy for the full invoice amount, pay only part of it
+// now, owe the rest. The vault is only ever debited for cash that actually
+// left it; "paid so far" / "remaining" are derived from the ledger, never
+// stored, so reversing any linked payment keeps the numbers correct.
+// ---------------------------------------------------------------------------
+
+export interface RecordExpenseWithPayableInput extends RecordExpenseInput {
+  /** The full invoice/purchase amount. amountQirsh is only what's paid now;
+   * the difference becomes an open Payable owed to `counterparty`. */
+  totalQirsh: number
+}
+
+export async function recordExpenseWithPayable(input: RecordExpenseWithPayableInput): Promise<{ entry: LedgerEntry; payable: Payable | null }> {
+  if (input.totalQirsh <= 0) throw new LedgerError('إجمالي قيمة الفاتورة يجب أن يكون أكبر من صفر')
+  if (input.amountQirsh < 0) throw new LedgerError('قيمة المدفوع الآن لا يمكن أن تكون بالسالب')
+  if (input.amountQirsh > input.totalQirsh) {
+    throw new LedgerError('المبلغ المدفوع الآن لا يمكن أن يكون أكبر من إجمالي قيمة الفاتورة')
+  }
+  if (!input.counterparty?.trim()) throw new LedgerError('اسم المورد مطلوب لتسجيل فاتورة بدفعة جزئية')
+  const supplierName = input.counterparty.trim()
+
+  return db.transaction('rw', [db.ledger, db.categories, db.funders, db.allocations, db.settings, db.payables], async () => {
+    const remainingQirsh = input.totalQirsh - input.amountQirsh
+
+    // amountQirsh may be 0 (nothing paid yet, pure debt) — checkCanSpend/insertExpenseEntry
+    // require a positive amount, so route that case through a zero-cash marker entry instead.
+    const paidNowQirsh = input.amountQirsh > 0 ? input.amountQirsh : 0
+    let entry: LedgerEntry
+    if (paidNowQirsh > 0) {
+      const activeFunders = await checkCanSpend(paidNowQirsh)
+      entry = await insertExpenseEntry({ ...input, amountQirsh: paidNowQirsh }, activeFunders)
+    } else {
+      // Nothing paid yet: still record a zero-value EXPENSE entry so the
+      // payable has an originLedgerEntryId to anchor to and the purchase
+      // shows up in the category's history from day one.
+      await checkCanSpend(0)
+      entry = {
+        id: newId(),
+        type: 'EXPENSE',
+        date: input.date,
+        amountQirsh: 0,
+        description: input.description.trim() || 'مصروف',
+        counterparty: supplierName,
+        paymentMethod: input.paymentMethod,
+        invoiceNumber: input.invoiceNumber?.trim() || undefined,
+        categoryId: input.categoryId,
+        createdAt: new Date().toISOString(),
+      }
+      await db.ledger.add(entry)
+    }
+
+    if (remainingQirsh <= 0) return { entry, payable: null }
+
+    const payable: Payable = {
+      id: newId(),
+      categoryId: input.categoryId,
+      supplierName,
+      totalQirsh: input.totalQirsh,
+      date: input.date,
+      description: input.description.trim() || 'مصروف',
+      originLedgerEntryId: entry.id,
+      createdAt: new Date().toISOString(),
+    }
+    await db.payables.add(payable)
+    return { entry, payable }
+  })
+}
+
+export interface PayableStatus {
+  payable: Payable
+  paidQirsh: number
+  remainingQirsh: number
+  settlementEntries: LedgerEntry[]
+}
+
+export async function getPayableStatus(payableId: string): Promise<PayableStatus> {
+  const payable = await db.payables.get(payableId)
+  if (!payable) throw new LedgerError('المستحق غير موجود')
+
+  const origin = await db.ledger.get(payable.originLedgerEntryId)
+  const settlements = await db.payableSettlements.where('payableId').equals(payableId).toArray()
+  const settlementEntries = (
+    await Promise.all(settlements.map((s) => db.ledger.get(s.ledgerEntryId)))
+  ).filter((e): e is LedgerEntry => !!e)
+
+  const paidQirsh = [origin, ...settlementEntries].reduce((sum, e) => (e ? sum - signedAmount(e) : sum), 0)
+  return { payable, paidQirsh, remainingQirsh: payable.totalQirsh - paidQirsh, settlementEntries }
+}
+
+export async function listOpenPayables(): Promise<PayableStatus[]> {
+  const all = await db.payables.toArray()
+  const statuses = await Promise.all(all.map((p) => getPayableStatus(p.id)))
+  return statuses.filter((s) => s.remainingQirsh > 0).sort((a, b) => a.payable.date.localeCompare(b.payable.date))
+}
+
+export async function listAllPayables(): Promise<PayableStatus[]> {
+  const all = await db.payables.toArray()
+  const statuses = await Promise.all(all.map((p) => getPayableStatus(p.id)))
+  return statuses.sort((a, b) => b.payable.createdAt.localeCompare(a.payable.createdAt))
+}
+
+export interface SettlePayableInput {
+  payableId: string
+  amountQirsh: number
+  date: string
+  paymentMethod?: PaymentMethod
+  invoiceNumber?: string
+}
+
+/** Pays some or all of what's still owed on a Payable. Reuses recordExpense
+ * as-is (same balance check, same funder-share allocation, same category),
+ * then links the new entry back to the payable as a settlement. */
+export async function settlePayable(input: SettlePayableInput): Promise<LedgerEntry> {
+  if (input.amountQirsh <= 0) throw new LedgerError('قيمة السداد يجب أن تكون أكبر من صفر')
+
+  return db.transaction(
+    'rw',
+    [db.ledger, db.categories, db.funders, db.allocations, db.settings, db.payables, db.payableSettlements],
+    async () => {
+      const status = await getPayableStatus(input.payableId)
+      if (input.amountQirsh > status.remainingQirsh) {
+        throw new LedgerError(
+          `قيمة السداد أكبر من المتبقي. المتبقي للمورد ${status.payable.supplierName} هو ${(status.remainingQirsh / 100).toFixed(2)} ج.م`,
+        )
+      }
+
+      const activeFunders = await checkCanSpend(input.amountQirsh)
+      const entry = await insertExpenseEntry(
+        {
+          categoryId: status.payable.categoryId,
+          amountQirsh: input.amountQirsh,
+          date: input.date,
+          description: `سداد مستحق مورد: ${status.payable.supplierName} (${status.payable.description})`,
+          counterparty: status.payable.supplierName,
+          paymentMethod: input.paymentMethod,
+          invoiceNumber: input.invoiceNumber,
+        },
+        activeFunders,
+      )
+
+      await db.payableSettlements.add({ id: newId(), payableId: input.payableId, ledgerEntryId: entry.id, createdAt: new Date().toISOString() })
+      return entry
+    },
+  )
+}
+
 export async function reverseEntry(entryId: string, reason: string): Promise<LedgerEntry> {
   if (!reason.trim()) throw new LedgerError('سبب الإلغاء مطلوب')
 
@@ -433,6 +580,7 @@ export interface DashboardSummary {
   balanceQirsh: number
   totalContributionsQirsh: number
   totalExpensesQirsh: number
+  totalPayablesQirsh: number
   funderCount: number
   categoryCount: number
   recentEntries: LedgerEntry[]
@@ -440,11 +588,13 @@ export interface DashboardSummary {
 }
 
 export async function getDashboardSummary(): Promise<DashboardSummary> {
-  const [entries, funders, categories] = await Promise.all([
+  const [entries, funders, categories, openPayables] = await Promise.all([
     db.ledger.toArray(),
     db.funders.toArray(),
     db.categories.toArray(),
+    listOpenPayables(),
   ])
+  const totalPayablesQirsh = openPayables.reduce((s, p) => s + p.remainingQirsh, 0)
 
   // Bucket by the entry's own type (not by the sign of signedAmount): a
   // reversed CONTRIBUTION has a negative signedAmount but must still reduce
@@ -474,6 +624,7 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
     balanceQirsh: totalContributionsQirsh - totalExpensesQirsh,
     totalContributionsQirsh,
     totalExpensesQirsh,
+    totalPayablesQirsh,
     funderCount: funders.filter((f) => f.active).length,
     categoryCount: categories.filter((c) => c.active).length,
     recentEntries,

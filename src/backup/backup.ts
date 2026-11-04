@@ -1,7 +1,7 @@
 import { db, ensureSettings, newId } from '../db/db'
-import type { ExpenseAllocation, ExpenseCategory, Funder, LedgerEntry, Settings } from '../domain/types'
+import type { ExpenseAllocation, ExpenseCategory, Funder, LedgerEntry, Payable, PayableSettlement, Settings } from '../domain/types'
 
-const BACKUP_FORMAT_VERSION = 1
+const BACKUP_FORMAT_VERSION = 2
 const MAX_AUTO_SNAPSHOTS = 14
 
 export interface BackupPayload {
@@ -12,15 +12,19 @@ export interface BackupPayload {
   ledger: LedgerEntry[]
   allocations: ExpenseAllocation[]
   settings: Settings
+  payables: Payable[]
+  payableSettlements: PayableSettlement[]
 }
 
 export async function buildBackupPayload(): Promise<BackupPayload> {
-  const [funders, categories, ledger, allocations, settings] = await Promise.all([
+  const [funders, categories, ledger, allocations, settings, payables, payableSettlements] = await Promise.all([
     db.funders.toArray(),
     db.categories.toArray(),
     db.ledger.toArray(),
     db.allocations.toArray(),
     ensureSettings(),
+    db.payables.toArray(),
+    db.payableSettlements.toArray(),
   ])
   return {
     formatVersion: BACKUP_FORMAT_VERSION,
@@ -30,6 +34,8 @@ export async function buildBackupPayload(): Promise<BackupPayload> {
     ledger,
     allocations,
     settings,
+    payables,
+    payableSettlements,
   }
 }
 
@@ -52,12 +58,24 @@ export class BackupValidationError extends Error {}
 function validatePayload(data: unknown): BackupPayload {
   if (!data || typeof data !== 'object') throw new BackupValidationError('ملف النسخة الاحتياطية غير صالح')
   const d = data as Record<string, unknown>
-  if (d.formatVersion !== BACKUP_FORMAT_VERSION) throw new BackupValidationError('إصدار ملف النسخة الاحتياطية غير متوافق')
+  // Version 1 backups (from before supplier payables existed) are still
+  // restorable — they simply have no payables/payableSettlements rows.
+  if (d.formatVersion !== 1 && d.formatVersion !== BACKUP_FORMAT_VERSION) {
+    throw new BackupValidationError('إصدار ملف النسخة الاحتياطية غير متوافق')
+  }
   for (const key of ['funders', 'categories', 'ledger', 'allocations']) {
     if (!Array.isArray(d[key])) throw new BackupValidationError(`الملف تالف: الحقل "${key}" غير موجود`)
   }
   if (!d.settings || typeof d.settings !== 'object') throw new BackupValidationError('الملف تالف: إعدادات غير موجودة')
-  return d as unknown as BackupPayload
+  if (d.payables !== undefined && !Array.isArray(d.payables)) throw new BackupValidationError('الملف تالف: حقل المستحقات غير صالح')
+  if (d.payableSettlements !== undefined && !Array.isArray(d.payableSettlements)) {
+    throw new BackupValidationError('الملف تالف: حقل سدادات المستحقات غير صالح')
+  }
+  return {
+    ...(d as unknown as BackupPayload),
+    payables: (d.payables as Payable[] | undefined) ?? [],
+    payableSettlements: (d.payableSettlements as PayableSettlement[] | undefined) ?? [],
+  }
 }
 
 /** Restores from a backup payload. Validates fully before touching the live database,
@@ -66,22 +84,30 @@ function validatePayload(data: unknown): BackupPayload {
 export async function restoreFromPayload(raw: unknown): Promise<void> {
   const payload = validatePayload(raw)
 
-  await db.transaction('rw', [db.funders, db.categories, db.ledger, db.allocations, db.settings], async () => {
-    await Promise.all([
-      db.funders.clear(),
-      db.categories.clear(),
-      db.ledger.clear(),
-      db.allocations.clear(),
-      db.settings.clear(),
-    ])
-    await Promise.all([
-      db.funders.bulkAdd(payload.funders),
-      db.categories.bulkAdd(payload.categories),
-      db.ledger.bulkAdd(payload.ledger),
-      db.allocations.bulkAdd(payload.allocations),
-      db.settings.add(payload.settings),
-    ])
-  })
+  await db.transaction(
+    'rw',
+    [db.funders, db.categories, db.ledger, db.allocations, db.settings, db.payables, db.payableSettlements],
+    async () => {
+      await Promise.all([
+        db.funders.clear(),
+        db.categories.clear(),
+        db.ledger.clear(),
+        db.allocations.clear(),
+        db.settings.clear(),
+        db.payables.clear(),
+        db.payableSettlements.clear(),
+      ])
+      await Promise.all([
+        db.funders.bulkAdd(payload.funders),
+        db.categories.bulkAdd(payload.categories),
+        db.ledger.bulkAdd(payload.ledger),
+        db.allocations.bulkAdd(payload.allocations),
+        db.settings.add(payload.settings),
+        payload.payables.length ? db.payables.bulkAdd(payload.payables) : Promise.resolve(),
+        payload.payableSettlements.length ? db.payableSettlements.bulkAdd(payload.payableSettlements) : Promise.resolve(),
+      ])
+    },
+  )
 }
 
 export async function readBackupFile(file: File): Promise<unknown> {
