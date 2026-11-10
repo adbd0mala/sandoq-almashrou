@@ -163,7 +163,13 @@ function ItemCard({
           </div>
         </>
       )}
-      <AgreedTotalControl item={item} />
+      {item.cancelled ? (
+        <p className="text-xs text-slate-500 mt-1">
+          كل دفعات الصنف ده ملغاة، فمفيش عليه مستحق للمورد. لو اتدفع له تاني استخدم «إضافة دفعة».
+        </p>
+      ) : (
+        <AgreedTotalControl item={item} />
+      )}
       <div className="flex justify-between text-sm mt-1">
         <span className="text-slate-500">غير موزَّع على بنود</span>
         {canDistribute ? (
@@ -628,7 +634,9 @@ function AddPaymentModal({ item, onClose }: { item: AdvanceStatus; onClose: () =
 
   const amountQirsh = Number(amount) > 0 ? egpToQirsh(Number(amount)) : 0
   const usesShares = item.hasQuantity || item.shares.length > 0
-  const owed = item.owedQirsh === null ? null : Math.max(0, item.owedQirsh)
+  // Against the full price directly: owedQirsh is null for a cancelled item,
+  // but a new payment for it still can't exceed the price that was agreed.
+  const owed = item.agreedTotalQirsh === null ? null : Math.max(0, item.agreedTotalQirsh - item.totalPaidQirsh)
   const overpays = owed !== null && amountQirsh > owed
 
   async function submit() {

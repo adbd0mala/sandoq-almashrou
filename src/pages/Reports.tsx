@@ -4,6 +4,7 @@ import { db } from '../db/db'
 import {
   LedgerError,
   describeItemUnits,
+  describeReversalEffect,
   getCategoryStatement,
   getFunderStatement,
   getDashboardSummary,
@@ -93,7 +94,16 @@ function EntryRow({ entry, onChanged }: { entry: LedgerEntry; onChanged: () => v
   const [editing, setEditing] = useState(false)
   const [reason, setReason] = useState('')
   const [error, setError] = useState('')
+  const [effect, setEffect] = useState<string | null>(null)
   const canReverse = !entry.reversalOfId && !entry.reversed
+
+  // Cancelling an invoice also cancels what's owed on it, and cancelling a
+  // settlement re-opens the debt: say so before the user confirms.
+  async function startReverse() {
+    setError('')
+    setEffect(await describeReversalEffect(entry.id))
+    setConfirming(true)
+  }
 
   async function doReverse() {
     try {
@@ -133,7 +143,7 @@ function EntryRow({ entry, onChanged }: { entry: LedgerEntry; onChanged: () => v
             <button className="text-teal-700" onClick={() => setEditing(true)}>
               تعديل
             </button>
-            <button className="text-red-500" onClick={() => setConfirming(true)}>
+            <button className="text-red-500" onClick={startReverse}>
               إلغاء الحركة
             </button>
           </span>
@@ -143,6 +153,7 @@ function EntryRow({ entry, onChanged }: { entry: LedgerEntry; onChanged: () => v
       {confirming && (
         <div className="mt-2 bg-red-50 rounded-lg p-2 space-y-2 no-print">
           {error && <div className="text-red-600 text-xs">{error}</div>}
+          {effect && <div className="text-amber-800 text-xs">{effect}</div>}
           <input
             className={inputClass}
             placeholder="سبب الإلغاء"
@@ -480,7 +491,9 @@ function PayablesReport({ onOpenItems }: { onOpenItems: () => void }) {
             {p.payable.description} · {p.payable.date}
           </div>
         </div>
-        {p.remainingQirsh > 0 ? (
+        {p.cancelled ? (
+          <span className="text-slate-500 font-semibold shrink-0">ملغاة</span>
+        ) : p.remainingQirsh > 0 ? (
           <span className="text-amber-700 font-bold tabular-nums shrink-0">{formatEGP(p.remainingQirsh)}</span>
         ) : (
           <span className="text-emerald-600 font-semibold shrink-0">خالص</span>
@@ -489,9 +502,21 @@ function PayablesReport({ onOpenItems }: { onOpenItems: () => void }) {
       <div className="text-xs text-slate-500 mt-2">
         إجمالي الفاتورة: {formatEGP(p.payable.totalQirsh)} · المدفوع: {formatEGP(p.paidQirsh)}
       </div>
-      <button className="text-teal-700 text-xs font-semibold mt-1" onClick={() => setEditingId(p.payable.id)}>
-        تعديل اسم المورد أو إجمالي الفاتورة
-      </button>
+      {p.cancelled ? (
+        <div className="text-xs mt-1">
+          <span className="text-slate-500">الفاتورة اتلغت، فمفيش عليها مستحق للمورد.</span>
+          {p.paidQirsh > 0 && (
+            <span className="text-amber-800">
+              {' '}
+              لكن اتسدد منها {formatEGP(p.paidQirsh)} لسه محسوبين على البند. لو الفلوس دي رجعت، الغِ دفعات السداد من كشف البند.
+            </span>
+          )}
+        </div>
+      ) : (
+        <button className="text-teal-700 text-xs font-semibold mt-1" onClick={() => setEditingId(p.payable.id)}>
+          تعديل اسم المورد أو إجمالي الفاتورة
+        </button>
+      )}
       {p.remainingQirsh > 0 && (
         <Button variant="secondary" className="w-full mt-3" onClick={() => setSettlingId(p.payable.id)}>
           سداد جزء أو كل الباقي
@@ -540,7 +565,7 @@ function PayablesReport({ onOpenItems }: { onOpenItems: () => void }) {
       {closed.length > 0 && (
         <>
           <button className="text-sm text-teal-700 font-semibold" onClick={() => setShowClosed((v) => !v)}>
-            {showClosed ? 'إخفاء' : 'عرض'} المستحقات اللي اتسددت بالكامل ({formatUnits(closed.length)})
+            {showClosed ? 'إخفاء' : 'عرض'} المستحقات المقفولة: خالصة أو ملغاة ({formatUnits(closed.length)})
           </button>
           {showClosed && closed.map(payableCard)}
         </>

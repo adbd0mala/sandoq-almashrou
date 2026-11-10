@@ -446,8 +446,12 @@ export async function recordExpenseWithPayable(input: RecordExpenseWithPayableIn
 export interface PayableStatus {
   payable: Payable
   paidQirsh: number
+  /** Still owed to the supplier. Always 0 for a cancelled invoice. */
   remainingQirsh: number
   settlementEntries: LedgerEntry[]
+  /** True once the invoice's own expense entry has been cancelled: the
+   * purchase is void, so nothing is owed for it any more. */
+  cancelled: boolean
 }
 
 /** Sums an entry's cash effect together with any reversal of it, so a
@@ -474,7 +478,13 @@ export async function getPayableStatus(payableId: string): Promise<PayableStatus
   const effects = await Promise.all(ids.map(paidEffect))
   const paidQirsh = effects.reduce((s, v) => s + v, 0)
 
-  return { payable, paidQirsh, remainingQirsh: payable.totalQirsh - paidQirsh, settlementEntries }
+  // Cancelling the invoice's expense cancels the debt with it. Derived from
+  // the entry rather than stored, so invoices cancelled before this rule
+  // existed stop showing as owed too.
+  const origin = await db.ledger.get(payable.originLedgerEntryId)
+  const cancelled = origin?.reversed === true
+
+  return { payable, paidQirsh, remainingQirsh: cancelled ? 0 : payable.totalQirsh - paidQirsh, settlementEntries, cancelled }
 }
 
 export async function listOpenPayables(): Promise<PayableStatus[]> {
@@ -512,6 +522,7 @@ export async function settlePayable(input: SettlePayableInput): Promise<LedgerEn
     [db.ledger, db.categories, db.funders, db.allocations, db.settings, db.payables, db.payableSettlements],
     async () => {
       const status = await getPayableStatus(input.payableId)
+      if (status.cancelled) throw new LedgerError('الفاتورة دي ملغاة، ومفيش عليها مستحق يتسدد')
       if (input.amountQirsh > status.remainingQirsh) {
         throw new LedgerError(
           `قيمة السداد أكبر من المتبقي. المتبقي للمورد ${status.payable.supplierName} هو ${formatEGP(status.remainingQirsh)}`,
@@ -721,10 +732,13 @@ export async function recordAdvancePayment(input: RecordAdvancePaymentInput): Pr
   if (input.amountQirsh <= 0) throw new LedgerError('قيمة الدفعة يجب أن تكون أكبر من صفر')
 
   return db.transaction('rw', [db.ledger, db.funders, db.allocations, db.settings, db.advanceShares], async () => {
-    const { advance, owedQirsh } = await getAdvanceStatus(input.advanceId)
-    if (owedQirsh !== null && input.amountQirsh > owedQirsh) {
+    const { advance, agreedTotalQirsh, totalPaidQirsh } = await getAdvanceStatus(input.advanceId)
+    // Measured against the full price directly (not owedQirsh), so the cap
+    // also holds when paying again for an item whose payments were cancelled.
+    const leftToPayQirsh = agreedTotalQirsh === null ? null : Math.max(0, agreedTotalQirsh - totalPaidQirsh)
+    if (leftToPayQirsh !== null && input.amountQirsh > leftToPayQirsh) {
       throw new LedgerError(
-        `الدفعة أكبر من الباقي من حساب الصنف (${formatEGP(Math.max(0, owedQirsh))}). لو الحساب اتغيّر عدّل إجمالي الحساب الأول`,
+        `الدفعة أكبر من الباقي من حساب الصنف (${formatEGP(leftToPayQirsh)}). لو الحساب اتغيّر عدّل إجمالي الحساب الأول`,
       )
     }
     const activeFunders = await checkCanSpend(input.amountQirsh)
@@ -770,8 +784,13 @@ export interface AdvanceStatus {
   remainingQirsh: number
   /** The item's full price if it has been set, else null (not known yet). */
   agreedTotalQirsh: number | null
-  /** Still to pay the supplier: full price − paid so far. null while the full price isn't known. */
+  /** Still owed to the supplier: full price − paid so far. null while the
+   * full price isn't known, and for a cancelled item. */
   owedQirsh: number | null
+  /** True when every payment for the item has been cancelled: nothing was
+   * bought in the end, so nothing is owed for it. Recording a new payment
+   * brings the item back. */
+  cancelled: boolean
 }
 
 const UNIT_EPSILON = 1e-6
@@ -817,6 +836,7 @@ export async function getAdvanceStatus(advanceId: string): Promise<AdvanceStatus
   }
   const sharedQirsh = shares.reduce((s, c) => s + c.amountQirsh, 0)
   const agreedTotalQirsh = advance.agreedTotalQirsh !== undefined && advance.agreedTotalQirsh > 0 ? advance.agreedTotalQirsh : null
+  const cancelled = totalPaidQirsh <= 0
 
   return {
     advance,
@@ -830,7 +850,8 @@ export async function getAdvanceStatus(advanceId: string): Promise<AdvanceStatus
     remainingUnits,
     remainingQirsh: totalPaidQirsh - fixedAllocatedQirsh - sharedQirsh,
     agreedTotalQirsh,
-    owedQirsh: agreedTotalQirsh === null ? null : agreedTotalQirsh - totalPaidQirsh,
+    owedQirsh: agreedTotalQirsh === null || cancelled ? null : agreedTotalQirsh - totalPaidQirsh,
+    cancelled,
   }
 }
 
@@ -964,16 +985,46 @@ export async function removeAdvanceShare(shareId: string): Promise<void> {
   await db.advanceShares.delete(shareId)
 }
 
+/** What else cancelling this entry does, in the user's words — shown before
+ * they confirm. null when cancelling only undoes the entry itself. */
+export async function describeReversalEffect(entryId: string): Promise<string | null> {
+  const payable = await db.payables.where('originLedgerEntryId').equals(entryId).first()
+  if (payable) {
+    const status = await getPayableStatus(payable.id)
+    return status.remainingQirsh > 0
+      ? `دي فاتورة لسه عليها ${formatEGP(status.remainingQirsh)} للمورد ${payable.supplierName}. إلغاؤها بيلغي المستحق ده كمان.`
+      : null
+  }
+  const settlement = await db.payableSettlements.where('ledgerEntryId').equals(entryId).first()
+  if (!settlement) return null
+  const settled = await getPayableStatus(settlement.payableId)
+  return settled.cancelled
+    ? null
+    : `دي دفعة سداد لمستحق المورد ${settled.payable.supplierName}. إلغاؤها بيرجّع قيمتها للباقي عليه.`
+}
+
 export async function reverseEntry(entryId: string, reason: string): Promise<LedgerEntry> {
   if (!reason.trim()) throw new LedgerError('سبب الإلغاء مطلوب')
 
-  return db.transaction('rw', [db.ledger, db.allocations, db.advanceShares], async () => {
+  return db.transaction('rw', [db.ledger, db.allocations, db.advanceShares, db.payables, db.payableSettlements], async () => {
     const original = await db.ledger.get(entryId)
     if (!original) throw new LedgerError('الحركة غير موجودة')
     if (original.reversalOfId) throw new LedgerError('لا يمكن إلغاء حركة عكسية بالفعل')
 
     const existingReversal = await db.ledger.where('reversalOfId').equals(entryId).first()
     if (existingReversal) throw new LedgerError('هذه الحركة مُلغاة من قبل')
+
+    // Cancelling an invoice's own expense voids what is still owed on it
+    // (see getPayableStatus). Payments made against it afterwards are real
+    // money to that supplier, so they have to be cancelled first — otherwise
+    // they'd be left paying off an invoice that no longer exists.
+    const payable = await db.payables.where('originLedgerEntryId').equals(entryId).first()
+    if (payable) {
+      const { settlementEntries } = await getPayableStatus(payable.id)
+      if (settlementEntries.some((e) => !e.reversed)) {
+        throw new LedgerError('الفاتورة دي اتسدد منها دفعات بعد كده. الغِ دفعات السداد الأول من كشف البند، وبعدين الغِ الفاتورة')
+      }
+    }
 
     // Cancelling a payment can't leave more money attributed to بنود by fixed
     // amount than was paid for the item. Unit/percent shares need no such
@@ -1183,7 +1234,8 @@ export async function updateAdvanceItem(advanceId: string, patch: UpdateAdvanceI
  * below what has been paid; setting it equal to that closes the payable. */
 export async function updatePayable(payableId: string, patch: { supplierName?: string; totalQirsh?: number }): Promise<void> {
   await db.transaction('rw', [db.ledger, db.payables, db.payableSettlements], async () => {
-    const { payable, paidQirsh } = await getPayableStatus(payableId)
+    const { payable, paidQirsh, cancelled } = await getPayableStatus(payableId)
+    if (cancelled) throw new LedgerError('الفاتورة دي ملغاة، وبياناتها بتفضل زي ما اتسجلت')
 
     const supplierName = patch.supplierName !== undefined ? patch.supplierName.trim() : payable.supplierName
     if (!supplierName) throw new LedgerError('اسم المورد مطلوب')
