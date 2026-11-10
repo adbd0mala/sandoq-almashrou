@@ -3,25 +3,24 @@ import { useEffect, useRef, useState } from 'react'
 import { db } from '../db/db'
 import {
   LedgerError,
-  allocateAdvance,
+  describeItemUnits,
   getCategoryStatement,
   getFunderStatement,
   getDashboardSummary,
-  listOpenAdvances,
   listOpenPayables,
   reverseEntry,
   settlePayable,
   signedAmount,
-  type AdvanceStatus,
   type CategoryStatement,
   type FunderStatement,
   type PayableStatus,
 } from '../domain/ledger'
 import { egpToQirsh, formatEGP } from '../domain/money'
 import { Banner, Button, Card, EmptyState, Field, PageTitle, inputClass } from '../components/ui'
-import { PAYMENT_METHOD_LABELS, type ExpenseCategory, type LedgerEntry, type PaymentMethod } from '../domain/types'
+import { PAYMENT_METHOD_LABELS, type LedgerEntry, type PaymentMethod } from '../domain/types'
+import { ItemsReport } from './ItemsReport'
 
-type Tab = 'full' | 'funder' | 'category' | 'payables' | 'advances'
+type Tab = 'full' | 'funder' | 'category' | 'payables' | 'items'
 
 // xlsx / jspdf / html2canvas are heavy — load them only when an export button
 // is actually pressed instead of bloating the app's initial bundle.
@@ -47,8 +46,8 @@ export function Reports({ initialCategoryId }: { initialCategoryId?: string }) {
         <TabButton active={tab === 'payables'} onClick={() => setTab('payables')}>
           المستحقات للموردين
         </TabButton>
-        <TabButton active={tab === 'advances'} onClick={() => setTab('advances')}>
-          دفعات تحت التوزيع
+        <TabButton active={tab === 'items'} onClick={() => setTab('items')}>
+          الأصناف والدفعات
         </TabButton>
       </div>
 
@@ -56,7 +55,7 @@ export function Reports({ initialCategoryId }: { initialCategoryId?: string }) {
       {tab === 'funder' && <FunderReport />}
       {tab === 'category' && <CategoryReport initialCategoryId={initialCategoryId} />}
       {tab === 'payables' && <PayablesReport />}
-      {tab === 'advances' && <AdvancesReport />}
+      {tab === 'items' && <ItemsReport />}
     </div>
   )
 }
@@ -230,7 +229,7 @@ function FullProjectReport() {
                     : e.affectsVault === false
                       ? 'توزيع دفعة'
                       : e.type === 'ADVANCE'
-                        ? 'دفعة غير موزعة'
+                        ? 'دفعة صنف'
                         : 'مصروف'}
                 </td>
                 <td className="p-1.5 break-words max-w-[160px]">{e.description}</td>
@@ -394,13 +393,32 @@ function CategoryReport({ initialCategoryId }: { initialCategoryId?: string }) {
             </table>
             <h3 className="font-bold mb-2">الحركات</h3>
             {stmt.entries.length === 0 ? (
-              <EmptyState>لا توجد حركات</EmptyState>
+              stmt.itemShares.length === 0 && <EmptyState>لا توجد حركات</EmptyState>
             ) : (
               <ul className="divide-y divide-slate-100">
                 {stmt.entries.map((e) => (
                   <EntryRow key={e.id} entry={e} onReversed={() => load(categoryId)} />
                 ))}
               </ul>
+            )}
+            {stmt.itemShares.length > 0 && (
+              <>
+                <h3 className="font-bold mt-3 mb-2">نصيب البند من أصناف موزَّعة</h3>
+                <ul className="divide-y divide-slate-100">
+                  {stmt.itemShares.map((s) => (
+                    <li key={s.share.id} className="py-2 text-sm flex justify-between gap-2">
+                      <span className="text-slate-700 min-w-0 break-words">
+                        {s.item.advance.description} — {describeItemUnits(s.item, s.share.units)}
+                        {s.share.note && <span className="text-slate-400"> · {s.share.note}</span>}
+                      </span>
+                      <span className="font-semibold tabular-nums text-sky-600 shrink-0">{formatEGP(s.amountQirsh)}</span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-xs text-slate-400 mt-1 no-print">
+                  القيمة محسوبة من المدفوع لكل صنف لحد دلوقتي، وبتتعدل لوحدها لو اتدفع باقي حسابه أو اتغيّر توزيعه (من تبويب «الأصناف والدفعات»).
+                </p>
+              </>
             )}
           </div>
         </Card>
@@ -505,237 +523,6 @@ function SettlePayableModal({ status, onClose }: { status: PayableStatus; onClos
         <div className="flex gap-2">
           <Button className="flex-1" onClick={submit} disabled={amountQirsh <= 0 || amountQirsh > status.remainingQirsh}>
             تأكيد السداد
-          </Button>
-          <Button variant="secondary" onClick={onClose}>
-            إلغاء
-          </Button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function AdvancesReport() {
-  const advances = useLiveQuery(listOpenAdvances, [])
-  const categories = useLiveQuery(() => db.categories.toArray(), [])
-  const [allocating, setAllocating] = useState<AdvanceStatus | null>(null)
-
-  if (!advances || !categories) return null
-
-  if (advances.length === 0) {
-    return (
-      <Card>
-        <EmptyState>
-          مفيش دفعات تحت التوزيع دلوقتي. لما تسجّل مصروف من تبويب "دفعة بدون بند" هيظهر هنا لحد ما توزعه على البنود
-        </EmptyState>
-      </Card>
-    )
-  }
-
-  const totalUnallocated = advances.reduce((s, a) => s + a.remainingQirsh, 0)
-  const activeCategories = categories.filter((c) => c.active)
-
-  return (
-    <div className="space-y-3">
-      <Card className="bg-amber-50 border-amber-200">
-        <div className="text-sm text-amber-700">إجمالي الدفعات لسه مش موزعة</div>
-        <div className="text-xl font-bold text-amber-800">{formatEGP(totalUnallocated)}</div>
-      </Card>
-
-      {advances.map((a) => (
-        <AdvanceCard key={a.advance.id} status={a} activeCategories={activeCategories} onAllocate={() => setAllocating(a)} />
-      ))}
-
-      {allocating && (
-        <AllocateAdvanceModal status={allocating} categories={activeCategories} onClose={() => setAllocating(null)} />
-      )}
-    </div>
-  )
-}
-
-function AdvanceCard({
-  status: a,
-  activeCategories,
-  onAllocate,
-}: {
-  status: AdvanceStatus
-  activeCategories: ExpenseCategory[]
-  onAllocate: () => void
-}) {
-  const [confirming, setConfirming] = useState(false)
-  const [reason, setReason] = useState('')
-  const [error, setError] = useState('')
-
-  async function doReverse() {
-    try {
-      await reverseEntry(a.advance.id, reason)
-      setConfirming(false)
-    } catch (e) {
-      setError(e instanceof LedgerError ? e.message : 'حدث خطأ غير متوقع')
-    }
-  }
-
-  return (
-    <Card>
-      <div className="flex justify-between items-start">
-        <div>
-          <div className="font-semibold text-slate-800">{a.advance.description}</div>
-          <div className="text-xs text-slate-400">
-            {a.advance.counterparty ? `${a.advance.counterparty} · ` : ''}
-            {a.advance.date}
-          </div>
-        </div>
-        <span className="text-amber-700 font-bold tabular-nums">{formatEGP(a.remainingQirsh)}</span>
-      </div>
-      <div className="text-xs text-slate-500 mt-2">
-        إجمالي الدفعة: {formatEGP(a.advance.amountQirsh)} · الموزَّع: {formatEGP(a.allocatedQirsh)}
-      </div>
-      {activeCategories.length > 0 ? (
-        <Button variant="secondary" className="w-full mt-3" onClick={onAllocate}>
-          توزيع على البنود
-        </Button>
-      ) : (
-        <div className="text-xs text-red-500 mt-3">أضف بند مصروفات أولاً عشان تقدر توزّع الدفعة دي</div>
-      )}
-
-      {a.allocatedQirsh === 0 && !confirming && (
-        <button className="text-red-500 text-xs mt-2" onClick={() => setConfirming(true)}>
-          إلغاء الدفعة بالكامل (لو مسجلة غلط)
-        </button>
-      )}
-      {confirming && (
-        <div className="mt-2 bg-red-50 rounded-lg p-2 space-y-2">
-          {error && <div className="text-red-600 text-xs">{error}</div>}
-          <input className={inputClass} placeholder="سبب الإلغاء" value={reason} onChange={(e) => setReason(e.target.value)} />
-          <div className="flex gap-2">
-            <Button variant="danger" onClick={doReverse} disabled={!reason.trim()}>
-              تأكيد إلغاء الدفعة
-            </Button>
-            <Button variant="secondary" onClick={() => setConfirming(false)}>
-              رجوع
-            </Button>
-          </div>
-        </div>
-      )}
-    </Card>
-  )
-}
-
-interface AllocLine {
-  key: string
-  categoryId: string
-  amount: string
-  note: string
-}
-
-function AllocateAdvanceModal({
-  status,
-  categories,
-  onClose,
-}: {
-  status: AdvanceStatus
-  categories: ExpenseCategory[]
-  onClose: () => void
-}) {
-  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10))
-  const [lines, setLines] = useState<AllocLine[]>([{ key: crypto.randomUUID(), categoryId: '', amount: '', note: '' }])
-  const [error, setError] = useState('')
-
-  function updateLine(key: string, patch: Partial<AllocLine>) {
-    setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)))
-  }
-  function removeLine(key: string) {
-    setLines((ls) => (ls.length > 1 ? ls.filter((l) => l.key !== key) : ls))
-  }
-
-  const validLines = lines.filter((l) => l.categoryId && Number(l.amount) > 0)
-  const totalQirsh = validLines.reduce((s, l) => s + egpToQirsh(Number(l.amount)), 0)
-  const exceedsRemaining = totalQirsh > status.remainingQirsh
-  const canSubmit = validLines.length > 0 && validLines.length === lines.length && !exceedsRemaining
-
-  async function submit() {
-    setError('')
-    try {
-      await allocateAdvance({
-        advanceLedgerEntryId: status.advance.id,
-        date,
-        lines: lines.map((l) => ({ categoryId: l.categoryId, amountQirsh: egpToQirsh(Number(l.amount)), note: l.note })),
-      })
-      onClose()
-    } catch (e) {
-      setError(e instanceof LedgerError ? e.message : 'حدث خطأ غير متوقع')
-    }
-  }
-
-  return (
-    <div className="fixed inset-0 bg-black/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md max-h-[90vh] overflow-y-auto p-4 pb-6" onClick={(e) => e.stopPropagation()}>
-        <h2 className="font-bold text-lg text-slate-800 mb-3">توزيع دفعة: {status.advance.description}</h2>
-        {error && <Banner kind="error">{error}</Banner>}
-        <div className="text-sm text-slate-500 mb-3">المتبقي غير الموزَّع: {formatEGP(status.remainingQirsh)}</div>
-
-        <Field label="تاريخ التوزيع">
-          <input type="date" className={inputClass} value={date} onChange={(e) => setDate(e.target.value)} />
-        </Field>
-
-        <div className="space-y-3 mb-3">
-          {lines.map((line, idx) => (
-            <div key={line.key} className="border border-slate-200 rounded-xl p-3">
-              <div className="flex justify-between items-center mb-2">
-                <span className="text-xs text-slate-400">بند {idx + 1}</span>
-                {lines.length > 1 && (
-                  <button className="text-red-500 text-xs" onClick={() => removeLine(line.key)}>
-                    حذف السطر
-                  </button>
-                )}
-              </div>
-              <select
-                className={`${inputClass} mb-2`}
-                value={line.categoryId}
-                onChange={(e) => updateLine(line.key, { categoryId: e.target.value })}
-              >
-                <option value="">اختر البند</option>
-                {categories.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-              <div className="grid grid-cols-2 gap-2">
-                <input
-                  type="number"
-                  inputMode="decimal"
-                  placeholder="القيمة (ج.م)"
-                  className={inputClass}
-                  value={line.amount}
-                  onChange={(e) => updateLine(line.key, { amount: e.target.value })}
-                />
-                <input
-                  placeholder="ملاحظة (اختياري)"
-                  className={inputClass}
-                  value={line.note}
-                  onChange={(e) => updateLine(line.key, { note: e.target.value })}
-                />
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <Button
-          variant="secondary"
-          className="w-full mb-3"
-          onClick={() => setLines((ls) => [...ls, { key: crypto.randomUUID(), categoryId: '', amount: '', note: '' }])}
-        >
-          + إضافة بند
-        </Button>
-
-        <div className={`text-sm mb-3 font-semibold ${exceedsRemaining ? 'text-red-600' : 'text-slate-700'}`}>
-          إجمالي الموزَّع الآن: {formatEGP(totalQirsh)} {exceedsRemaining && '(أكبر من المتبقي!)'}
-        </div>
-
-        <div className="flex gap-2">
-          <Button className="flex-1" onClick={submit} disabled={!canSubmit}>
-            تأكيد التوزيع
           </Button>
           <Button variant="secondary" onClick={onClose}>
             إلغاء

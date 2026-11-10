@@ -27,10 +27,11 @@ export interface ExpenseCategory {
   createdAt: string
 }
 
-/** ADVANCE = money paid out before it's known which بند it belongs to (e.g.
- * a down payment to a contractor while work is still ongoing). It leaves the
- * vault immediately like an EXPENSE, but has no categoryId; allocateAdvance
- * later recognizes portions of it against real بنود. */
+/** ADVANCE = money paid out before it's known which بند it belongs to (a
+ * material bought for several بنود, or a down payment while work is still
+ * ongoing). It leaves the vault immediately like an EXPENSE, but has no
+ * categoryId; its cost reaches real بنود later, either through AdvanceShare
+ * rows (by units / percent) or allocateAdvance entries (fixed amounts). */
 export type LedgerEntryType = 'CONTRIBUTION' | 'EXPENSE' | 'ADVANCE'
 
 export interface LedgerEntry {
@@ -56,6 +57,31 @@ export interface LedgerEntry {
   /** Set on an advance-allocation entry: the id of the ADVANCE ledger entry
    * this recognizes a portion of against a category. */
   advanceOriginId?: string
+  /** Set on a follow-up payment for an item bought earlier (deposit first,
+   * rest later): the id of the item's first ADVANCE entry. Copied onto the
+   * payment's reversal too, so one indexed lookup nets them out. */
+  advanceParentId?: string
+  /** Only on an item's first ADVANCE entry: how many units were bought
+   * (4 نقلة, 60 شيكارة). When set, the item is distributed to بنود by
+   * units; when absent it's distributed by percent or by fixed amounts. */
+  quantity?: number
+  unitName?: string
+}
+
+/** One بند's share of an item (an ADVANCE and its follow-up payments),
+ * expressed in the item's units — or in percent points (basis 100) when the
+ * item has no quantity. The money is never stored: it is always derived as
+ * (what's been paid for the item so far) × units ÷ basis, so paying the rest
+ * of the price later, or cancelling a payment, re-prices every share by
+ * itself with nothing to redo. */
+export interface AdvanceShare {
+  id: string
+  advanceId: string
+  categoryId: string
+  units: number
+  note?: string
+  date: string
+  createdAt: string
 }
 
 export interface ExpenseAllocation {

@@ -17,6 +17,12 @@ export function formatEGP(qirsh: number): string {
   )
 }
 
+/** A quantity or percentage for display: Arabic digits like the money
+ * amounts beside it, at most 2 decimals, no trailing zeros. */
+export function formatUnits(n: number): string {
+  return n.toLocaleString('ar-EG', { maximumFractionDigits: 2 })
+}
+
 /**
  * Split `totalQirsh` across `weights` (percentages, must sum to ~100) so the
  * parts sum EXACTLY to totalQirsh. Uses the largest-remainder method:

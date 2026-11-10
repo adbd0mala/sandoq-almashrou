@@ -1,22 +1,14 @@
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useState } from 'react'
 import { db } from '../db/db'
-import { LedgerError, addCategory, archiveCategory, deleteCategoryIfUnused, signedAmount, updateCategory } from '../domain/ledger'
+import { LedgerError, addCategory, archiveCategory, deleteCategoryIfUnused, getSpentByCategory, updateCategory } from '../domain/ledger'
 import { egpToQirsh, formatEGP } from '../domain/money'
 import { Banner, Button, Card, EmptyState, Field, Modal, PageTitle, inputClass } from '../components/ui'
 import type { ExpenseCategory } from '../domain/types'
 
 export function Categories({ onOpenStatement }: { onOpenStatement: (categoryId: string) => void }) {
   const categories = useLiveQuery(() => db.categories.toArray(), [])
-  const spentByCategory = useLiveQuery(async () => {
-    const entries = await db.ledger.where('type').equals('EXPENSE').toArray()
-    const map = new Map<string, number>()
-    for (const e of entries) {
-      if (!e.categoryId) continue
-      map.set(e.categoryId, (map.get(e.categoryId) ?? 0) - signedAmount(e))
-    }
-    return map
-  }, [])
+  const spentByCategory = useLiveQuery(getSpentByCategory, [])
 
   const [showAdd, setShowAdd] = useState(false)
   const [editing, setEditing] = useState<ExpenseCategory | null>(null)

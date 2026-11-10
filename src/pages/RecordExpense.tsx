@@ -43,7 +43,7 @@ export function RecordExpense({ onDone }: { onDone: () => void }) {
           تقسيم على بنود
         </ModeButton>
         <ModeButton active={mode === 'advance'} onClick={() => setMode('advance')}>
-          دفعة بدون بند
+          صنف يوزَّع لاحقًا
         </ModeButton>
       </div>
 
@@ -85,6 +85,8 @@ function AdvanceForm({ balanceQirsh, onDone }: { balanceQirsh: number | undefine
   const [amount, setAmount] = useState('')
   const [date, setDate] = useState(todayIso())
   const [description, setDescription] = useState('')
+  const [quantity, setQuantity] = useState('')
+  const [unitName, setUnitName] = useState('')
   const [counterparty, setCounterparty] = useState('')
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('CASH')
   const [invoiceNumber, setInvoiceNumber] = useState('')
@@ -93,14 +95,26 @@ function AdvanceForm({ balanceQirsh, onDone }: { balanceQirsh: number | undefine
 
   const amountQirsh = Number(amount) > 0 ? egpToQirsh(Number(amount)) : 0
   const willExceed = balanceQirsh !== undefined && amountQirsh > balanceQirsh
+  const quantityInvalid = quantity !== '' && !(Number(quantity) > 0)
 
   async function submit() {
     setError('')
     setSuccess(false)
     try {
-      await recordAdvance({ amountQirsh, date, description, counterparty, paymentMethod, invoiceNumber })
+      await recordAdvance({
+        amountQirsh,
+        date,
+        description,
+        counterparty,
+        paymentMethod,
+        invoiceNumber,
+        quantity: quantity !== '' ? Number(quantity) : undefined,
+        unitName,
+      })
       setAmount('')
       setDescription('')
+      setQuantity('')
+      setUnitName('')
       setCounterparty('')
       setInvoiceNumber('')
       setSuccess(true)
@@ -113,25 +127,42 @@ function AdvanceForm({ balanceQirsh, onDone }: { balanceQirsh: number | undefine
     <>
       {error && <Banner kind="error">{error}</Banner>}
       {success && (
-        <Banner kind="success">تم تسجيل الدفعة وخصمها من الصندوق. وزّعها على البنود بعدين من تبويب "دفعات تحت التوزيع" بالتقارير</Banner>
+        <Banner kind="success">
+          تم التسجيل والخصم من الصندوق. وزّعه على البنود، أو ضيف باقي حسابه، من تبويب «الأصناف والدفعات» بالتقارير
+        </Banner>
       )}
       {willExceed && <Banner kind="error">القيمة أكبر من الرصيد المتاح في الصندوق</Banner>}
 
       <Card>
         <p className="text-xs text-slate-500 mb-3">
-          لدفعة بتدفعها (مثلاً لمقاول) من غير ما تكون عارف هتتوزع على أنهي بنود لحد ما الشغل يخلص. الفلوس بتتخصم من
-          الصندوق دلوقتي، وتقدر توزعها على البنود الصح بعدين من غير ما الرصيد يتأثر تاني.
+          لصنف هيتستخدم في أكتر من بند (رمل، اسمنت، حديد…) أو دفعة مقدمة لسه مش معروف بندها. سجّل اللي دفعته دلوقتي حتى لو عربون —
+          تقدر تضيف باقي الحساب بعدين على نفس الصنف، وتوزّعه على البنود بالوحدات أو بالنسبة وقت ما تعرف.
         </p>
-        <Field label="القيمة (ج.م)">
+        <Field label="اسم الصنف / الوصف">
+          <input className={inputClass} value={description} maxLength={60} onChange={(e) => setDescription(e.target.value)} placeholder="مثال: رمل، أو دفعة مقدمة للمقاول" />
+        </Field>
+        <Field label="المدفوع الآن (ج.م)" hint="ممكن يكون عربون بس، حتى لو إجمالي الحساب لسه مش معروف">
           <input type="number" inputMode="decimal" className={inputClass} value={amount} onChange={(e) => setAmount(e.target.value)} />
         </Field>
+        <div className="grid grid-cols-2 gap-2">
+          <Field label="الكمية (اختياري)">
+            <input type="number" inputMode="decimal" className={inputClass} value={quantity} onChange={(e) => setQuantity(e.target.value)} placeholder="مثال: 4" />
+          </Field>
+          <Field label="الوحدة">
+            <input className={inputClass} value={unitName} maxLength={20} onChange={(e) => setUnitName(e.target.value)} placeholder="نقلة، طن، شيكارة" />
+          </Field>
+        </div>
+        {quantityInvalid ? (
+          <p className="text-xs text-red-600 -mt-2 mb-3">الكمية لازم تكون أكبر من صفر</p>
+        ) : (
+          <p className="text-xs text-slate-400 -mt-2 mb-3">
+            لو كتبت الكمية هتوزّع الصنف على البنود بعدد الوحدات. لو سبتها فاضية هتوزّعه بالنسبة المئوية أو بالمبلغ.
+          </p>
+        )}
         <Field label="التاريخ">
           <input type="date" className={inputClass} value={date} onChange={(e) => setDate(e.target.value)} />
         </Field>
-        <Field label="الوصف">
-          <input className={inputClass} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="مثال: دفعة مقدمة للمقاول" />
-        </Field>
-        <Field label="المستفيد (اختياري)">
+        <Field label="المورد / المستفيد (اختياري)">
           <input className={inputClass} value={counterparty} onChange={(e) => setCounterparty(e.target.value)} />
         </Field>
         <Field label="طريقة الدفع">
@@ -148,8 +179,8 @@ function AdvanceForm({ balanceQirsh, onDone }: { balanceQirsh: number | undefine
         </Field>
 
         <div className="flex gap-2">
-          <Button className="flex-1" onClick={submit} disabled={amountQirsh <= 0}>
-            تسجيل الدفعة
+          <Button className="flex-1" onClick={submit} disabled={amountQirsh <= 0 || quantityInvalid}>
+            تسجيل الصنف
           </Button>
           <Button variant="secondary" onClick={onDone}>
             رجوع

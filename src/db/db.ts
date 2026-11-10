@@ -1,5 +1,6 @@
 import Dexie, { type Table } from 'dexie'
 import type {
+  AdvanceShare,
   BackupSnapshot,
   ExpenseAllocation,
   ExpenseCategory,
@@ -19,6 +20,7 @@ export class AppDatabase extends Dexie {
   backups!: Table<BackupSnapshot, string>
   payables!: Table<Payable, string>
   payableSettlements!: Table<PayableSettlement, string>
+  advanceShares!: Table<AdvanceShare, string>
 
   constructor() {
     super('pfems-vault')
@@ -40,6 +42,12 @@ export class AppDatabase extends Dexie {
     // advanceOriginId indexed on ledger to find an advance's allocations.
     this.version(3).stores({
       ledger: 'id, type, date, funderId, categoryId, createdAt, reversalOfId, advanceOriginId',
+    })
+    // v4: items bought for several بنود — follow-up payments are found by
+    // advanceParentId, and unit/percent shares live in their own table.
+    this.version(4).stores({
+      ledger: 'id, type, date, funderId, categoryId, createdAt, reversalOfId, advanceOriginId, advanceParentId',
+      advanceShares: 'id, advanceId, categoryId',
     })
   }
 }

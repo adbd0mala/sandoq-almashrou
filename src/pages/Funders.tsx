@@ -13,8 +13,10 @@ export function Funders() {
   const [editing, setEditing] = useState<Funder | null>(null)
   const [error, setError] = useState('')
 
-  const active = (funders ?? []).filter((f) => f.active)
-  const archived = (funders ?? []).filter((f) => !f.active)
+  // Oldest first — ids are random, so the table's own order looks shuffled.
+  const ordered = [...(funders ?? [])].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  const active = ordered.filter((f) => f.active)
+  const archived = ordered.filter((f) => !f.active)
   const shareSum = active.reduce((s, f) => s + f.sharePercent, 0)
 
   return (

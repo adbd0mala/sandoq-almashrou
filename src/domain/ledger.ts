@@ -1,6 +1,6 @@
 import { db, ensureSettings, newId } from '../db/db'
-import type { ExpenseCategory, Funder, LedgerEntry, Payable, PaymentMethod } from './types'
-import { formatEGP, splitProportionally } from './money'
+import type { AdvanceShare, ExpenseCategory, Funder, LedgerEntry, Payable, PaymentMethod } from './types'
+import { formatEGP, formatUnits, splitProportionally } from './money'
 
 export class LedgerError extends Error {}
 
@@ -158,7 +158,8 @@ export async function archiveCategory(id: string): Promise<void> {
 }
 
 export async function deleteCategoryIfUnused(id: string): Promise<void> {
-  const count = await db.ledger.where('categoryId').equals(id).count()
+  const count =
+    (await db.ledger.where('categoryId').equals(id).count()) + (await db.advanceShares.where('categoryId').equals(id).count())
   if (count > 0) throw new LedgerError('لا يمكن حذف بند له حركات مالية سابقة. يمكنك أرشفته فقط')
   await db.categories.delete(id)
 }
@@ -638,11 +639,15 @@ export async function recordSplitExpenseWithPayable(
 }
 
 // ---------------------------------------------------------------------------
-// Advances — pay a contractor/supplier before knowing which بند the money
-// will end up against (e.g. a down payment while work is still ongoing).
-// Cash leaves the vault immediately; allocateAdvance later recognizes
-// portions of it against real بنود once the work/usage is known, without
-// touching the vault again (the cash already left).
+// Items / advances — money paid before it's known which بند it belongs to:
+// a material bought for several بنود (4 نقلات رمل), or a down payment while
+// work is still ongoing. Cash leaves the vault as each payment is recorded:
+// the first one, then any follow-ups (the rest of the price after a deposit).
+// The cost reaches real بنود later, one of two ways per item:
+//   - shares (AdvanceShare), by units or percent. Derived, never stored, so
+//     later payments and cancellations re-price every بند by themselves.
+//   - fixed amounts (allocateAdvance): category-tagged entries with
+//     affectsVault:false — "this much of the advance went to that بند".
 // ---------------------------------------------------------------------------
 
 export interface RecordAdvanceInput {
@@ -652,10 +657,14 @@ export interface RecordAdvanceInput {
   counterparty?: string
   paymentMethod?: PaymentMethod
   invoiceNumber?: string
+  /** How many units were bought. Set it to distribute the item by units later. */
+  quantity?: number
+  unitName?: string
 }
 
 export async function recordAdvance(input: RecordAdvanceInput): Promise<LedgerEntry> {
   if (input.amountQirsh <= 0) throw new LedgerError('قيمة الدفعة يجب أن تكون أكبر من صفر')
+  if (input.quantity !== undefined && !(input.quantity > 0)) throw new LedgerError('الكمية يجب أن تكون أكبر من صفر')
 
   return db.transaction('rw', [db.ledger, db.funders, db.allocations, db.settings], async () => {
     const activeFunders = await checkCanSpend(input.amountQirsh)
@@ -668,6 +677,8 @@ export async function recordAdvance(input: RecordAdvanceInput): Promise<LedgerEn
       counterparty: input.counterparty?.trim() || undefined,
       paymentMethod: input.paymentMethod,
       invoiceNumber: input.invoiceNumber?.trim() || undefined,
+      quantity: input.quantity,
+      unitName: input.quantity !== undefined ? input.unitName?.trim() || undefined : undefined,
       createdAt: new Date().toISOString(),
     }
     await db.ledger.add(entry)
@@ -676,28 +687,139 @@ export async function recordAdvance(input: RecordAdvanceInput): Promise<LedgerEn
   })
 }
 
+export interface RecordAdvancePaymentInput {
+  advanceId: string
+  amountQirsh: number
+  date: string
+  paymentMethod?: PaymentMethod
+  invoiceNumber?: string
+  note?: string
+}
+
+/** A further payment for an item already recorded — e.g. the rest of the
+ * price after a deposit, when the total wasn't known up front. Leaves the
+ * vault like any payment; shares re-price themselves from the new total. */
+export async function recordAdvancePayment(input: RecordAdvancePaymentInput): Promise<LedgerEntry> {
+  if (input.amountQirsh <= 0) throw new LedgerError('قيمة الدفعة يجب أن تكون أكبر من صفر')
+
+  return db.transaction('rw', [db.ledger, db.funders, db.allocations, db.settings, db.advanceShares], async () => {
+    const { advance } = await getAdvanceStatus(input.advanceId)
+    const activeFunders = await checkCanSpend(input.amountQirsh)
+    const entry: LedgerEntry = {
+      id: newId(),
+      type: 'ADVANCE',
+      date: input.date,
+      amountQirsh: input.amountQirsh,
+      description: `${advance.description} — ${input.note?.trim() || 'دفعة إضافية'}`,
+      counterparty: advance.counterparty,
+      paymentMethod: input.paymentMethod,
+      invoiceNumber: input.invoiceNumber?.trim() || undefined,
+      advanceParentId: advance.id,
+      createdAt: new Date().toISOString(),
+    }
+    await db.ledger.add(entry)
+    await recordFunderAllocations(entry.id, input.amountQirsh, activeFunders)
+    return entry
+  })
+}
+
+export interface AdvanceShareCost {
+  share: AdvanceShare
+  amountQirsh: number
+}
+
 export interface AdvanceStatus {
+  /** The item's first payment: its identity, name, quantity and unit. */
   advance: LedgerEntry
-  allocatedQirsh: number
-  remainingQirsh: number
+  /** Every payment made for the item, oldest first. Cancelled ones carry reversed:true. */
+  payments: LedgerEntry[]
+  totalPaidQirsh: number
+  /** Fixed-amount allocations (allocateAdvance entries and their reversals). */
   allocationEntries: LedgerEntry[]
+  fixedAllocatedQirsh: number
+  /** Unit/percent shares, each with the money it carries right now. */
+  shares: AdvanceShareCost[]
+  /** What share units are measured against: the item's quantity, or 100 (percent). */
+  basisUnits: number
+  hasQuantity: boolean
+  remainingUnits: number
+  /** Money not yet attributed to any بند. */
+  remainingQirsh: number
 }
 
-export async function getAdvanceStatus(advanceLedgerEntryId: string): Promise<AdvanceStatus> {
-  const advance = await db.ledger.get(advanceLedgerEntryId)
-  if (!advance || advance.type !== 'ADVANCE') throw new LedgerError('الدفعة غير موجودة')
+const UNIT_EPSILON = 1e-6
+const UNDISTRIBUTED_KEY = '__undistributed__'
 
-  const allocationEntries = await db.ledger.where('advanceOriginId').equals(advanceLedgerEntryId).toArray()
-  const allocatedQirsh = allocationEntries.reduce((s, e) => s - signedAmount(e), 0)
-
-  return { advance, allocatedQirsh, remainingQirsh: advance.amountQirsh - allocatedQirsh, allocationEntries }
+function isItemOrigin(e: LedgerEntry | undefined): e is LedgerEntry {
+  return !!e && e.type === 'ADVANCE' && !e.reversalOfId && !e.advanceParentId
 }
 
-export async function listOpenAdvances(): Promise<AdvanceStatus[]> {
+export async function getAdvanceStatus(advanceId: string): Promise<AdvanceStatus> {
+  const advance = await db.ledger.get(advanceId)
+  if (!isItemOrigin(advance)) throw new LedgerError('الصنف غير موجود')
+
+  const [originReversal, followUps, allocationEntries, shareRows] = await Promise.all([
+    db.ledger.where('reversalOfId').equals(advanceId).first(),
+    db.ledger.where('advanceParentId').equals(advanceId).toArray(), // later payments + their reversals
+    db.ledger.where('advanceOriginId').equals(advanceId).toArray(),
+    db.advanceShares.where('advanceId').equals(advanceId).toArray(),
+  ])
+
+  const cashRows = [advance, ...(originReversal ? [originReversal] : []), ...followUps]
+  const totalPaidQirsh = cashRows.reduce((s, e) => s - signedAmount(e), 0)
+  const payments = [advance, ...followUps.filter((e) => !e.reversalOfId)].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  const fixedAllocatedQirsh = allocationEntries.reduce((s, e) => s - signedAmount(e), 0)
+
+  const hasQuantity = advance.quantity !== undefined && advance.quantity > 0
+  const basisUnits = hasQuantity ? advance.quantity! : 100
+  const restUnits = basisUnits - shareRows.reduce((s, r) => s + r.units, 0)
+  const remainingUnits = restUnits > UNIT_EPSILON ? restUnits : 0
+
+  // Shares split whatever has been paid so far in proportion to their units;
+  // units not yet given to a بند keep their part of the money undistributed.
+  let shares: AdvanceShareCost[] = []
+  if (shareRows.length > 0) {
+    const split = splitProportionally(Math.max(0, totalPaidQirsh - fixedAllocatedQirsh), [
+      ...shareRows.map((r) => ({ key: r.id, percent: r.units })),
+      ...(remainingUnits > 0 ? [{ key: UNDISTRIBUTED_KEY, percent: remainingUnits }] : []),
+    ])
+    const amountById = new Map(split.map((s) => [s.key, s.amountQirsh]))
+    shares = [...shareRows]
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .map((r) => ({ share: r, amountQirsh: amountById.get(r.id) ?? 0 }))
+  }
+  const sharedQirsh = shares.reduce((s, c) => s + c.amountQirsh, 0)
+
+  return {
+    advance,
+    payments,
+    totalPaidQirsh,
+    allocationEntries,
+    fixedAllocatedQirsh,
+    shares,
+    basisUnits,
+    hasQuantity,
+    remainingUnits,
+    remainingQirsh: totalPaidQirsh - fixedAllocatedQirsh - sharedQirsh,
+  }
+}
+
+/** How a number of an item's share units reads to the user: "٢ نقلة (٥٠%)"
+ * for an item with a quantity, just "٤٠%" for one distributed by percent. */
+export function describeItemUnits(item: Pick<AdvanceStatus, 'advance' | 'basisUnits' | 'hasQuantity'>, units: number): string {
+  const percent = `${formatUnits((units / item.basisUnits) * 100)}%`
+  return item.hasQuantity ? `${formatUnits(units)} ${item.advance.unitName || 'وحدة'} (${percent})` : percent
+}
+
+/** Every item, oldest first — including fully distributed ones, since more
+ * of the price may still be paid later. Only fully cancelled items with
+ * nothing attached are left out. */
+export async function listAdvanceItems(): Promise<AdvanceStatus[]> {
   const all = await db.ledger.where('type').equals('ADVANCE').toArray()
-  const origins = all.filter((e) => !e.reversalOfId) // exclude reversal markers, keep only original advances
-  const statuses = await Promise.all(origins.map((a) => getAdvanceStatus(a.id)))
-  return statuses.filter((s) => s.remainingQirsh > 0 && !s.advance.reversed).sort((a, b) => a.advance.date.localeCompare(b.advance.date))
+  const statuses = await Promise.all(all.filter(isItemOrigin).map((a) => getAdvanceStatus(a.id)))
+  return statuses
+    .filter((s) => s.totalPaidQirsh !== 0 || s.shares.length > 0 || s.fixedAllocatedQirsh !== 0)
+    .sort((a, b) => a.advance.createdAt.localeCompare(b.advance.createdAt))
 }
 
 export interface AllocateAdvanceInput {
@@ -706,16 +828,20 @@ export interface AllocateAdvanceInput {
   lines: { categoryId: string; amountQirsh: number; note?: string }[]
 }
 
-/** Recognizes part (or all) of an already-paid ADVANCE against one or more
- * بنود, now that the actual usage/work is known. Creates category-tagged
- * EXPENSE entries with affectsVault:false — the vault was already debited
- * when the advance itself was recorded, so these must not debit it again. */
+/** Attributes a fixed amount of an already-paid advance to one or more
+ * بنود. Creates category-tagged EXPENSE entries with affectsVault:false —
+ * the vault was debited when the advance was paid, so these must not debit
+ * it again. Not for items distributed by units/percent: mixing a fixed
+ * amount into those would make a unit's price depend on the order of entry. */
 export async function allocateAdvance(input: AllocateAdvanceInput): Promise<LedgerEntry[]> {
   if (input.lines.length === 0) throw new LedgerError('أضف بند واحد على الأقل للتوزيع')
   if (input.lines.some((l) => l.amountQirsh <= 0)) throw new LedgerError('قيمة كل بند يجب أن تكون أكبر من صفر')
 
-  return db.transaction('rw', [db.ledger, db.categories], async () => {
+  return db.transaction('rw', [db.ledger, db.categories, db.advanceShares], async () => {
     const status = await getAdvanceStatus(input.advanceLedgerEntryId)
+    if (status.hasQuantity || status.shares.length > 0) {
+      throw new LedgerError('الصنف ده بيتوزع بالوحدات أو بالنسبة، مش بمبلغ ثابت')
+    }
     const totalToAllocate = input.lines.reduce((s, l) => s + l.amountQirsh, 0)
     if (totalToAllocate > status.remainingQirsh) {
       throw new LedgerError(
@@ -725,8 +851,7 @@ export async function allocateAdvance(input: AllocateAdvanceInput): Promise<Ledg
 
     const entries: LedgerEntry[] = []
     for (const line of input.lines) {
-      const category = await db.categories.get(line.categoryId)
-      if (!category || !category.active) throw new LedgerError('بند غير موجود أو مؤرشف')
+      await assertCategory(line.categoryId, true)
 
       const entry: LedgerEntry = {
         id: newId(),
@@ -748,10 +873,59 @@ export async function allocateAdvance(input: AllocateAdvanceInput): Promise<Ledg
   })
 }
 
+export interface AddAdvanceSharesInput {
+  advanceId: string
+  /** units are in the item's own basis: its quantity, or percent points when it has none. */
+  lines: { categoryId: string; units: number; note?: string }[]
+}
+
+/** Gives some of an item's units (or percent) to بنود. Only the split is
+ * stored; each بند's cost follows from what has been paid for the item. */
+export async function addAdvanceShares(input: AddAdvanceSharesInput): Promise<AdvanceShare[]> {
+  if (input.lines.length === 0) throw new LedgerError('أضف بند واحد على الأقل للتوزيع')
+  if (input.lines.some((l) => !(l.units > 0))) throw new LedgerError('قيمة كل بند يجب أن تكون أكبر من صفر')
+
+  return db.transaction('rw', [db.ledger, db.categories, db.advanceShares], async () => {
+    const status = await getAdvanceStatus(input.advanceId)
+    if (status.fixedAllocatedQirsh > 0) {
+      throw new LedgerError('الصنف ده اتوزع منه بمبلغ ثابت قبل كده. كمّل توزيعه بالمبلغ، أو الغِ التوزيعات دي الأول')
+    }
+    for (const line of input.lines) await assertCategory(line.categoryId, true)
+
+    // Values are typed from a rounded display ("1.33" of an exact 1.3333…),
+    // so a request within the tolerance of everything that's left means
+    // "all of it" — otherwise a sliver would stay undistributed forever.
+    const tolerance = Math.max(status.basisUnits * 0.0002, 0.005)
+    const units = input.lines.map((l) => l.units)
+    const gap = status.remainingUnits - units.reduce((s, u) => s + u, 0)
+    if (gap < -tolerance) throw new LedgerError('المطلوب توزيعه أكبر من غير الموزَّع من الصنف')
+    const last = units.length - 1
+    if (Math.abs(gap) <= tolerance && units[last] + gap > 0) units[last] += gap
+
+    const now = new Date().toISOString()
+    const rows: AdvanceShare[] = input.lines.map((line, idx) => ({
+      id: newId(),
+      advanceId: status.advance.id,
+      categoryId: line.categoryId,
+      units: units[idx],
+      note: line.note?.trim() || undefined,
+      date: now.slice(0, 10),
+      createdAt: now,
+    }))
+    await db.advanceShares.bulkAdd(rows)
+    return rows
+  })
+}
+
+/** Takes a بند's share back; its units and money return to "undistributed". */
+export async function removeAdvanceShare(shareId: string): Promise<void> {
+  await db.advanceShares.delete(shareId)
+}
+
 export async function reverseEntry(entryId: string, reason: string): Promise<LedgerEntry> {
   if (!reason.trim()) throw new LedgerError('سبب الإلغاء مطلوب')
 
-  return db.transaction('rw', [db.ledger, db.allocations], async () => {
+  return db.transaction('rw', [db.ledger, db.allocations, db.advanceShares], async () => {
     const original = await db.ledger.get(entryId)
     if (!original) throw new LedgerError('الحركة غير موجودة')
     if (original.reversalOfId) throw new LedgerError('لا يمكن إلغاء حركة عكسية بالفعل')
@@ -759,10 +933,13 @@ export async function reverseEntry(entryId: string, reason: string): Promise<Led
     const existingReversal = await db.ledger.where('reversalOfId').equals(entryId).first()
     if (existingReversal) throw new LedgerError('هذه الحركة مُلغاة من قبل')
 
+    // Cancelling a payment can't leave more money attributed to بنود by fixed
+    // amount than was paid for the item. Unit/percent shares need no such
+    // check: they re-price themselves from whatever remains paid.
     if (original.type === 'ADVANCE') {
-      const hasAllocations = await db.ledger.where('advanceOriginId').equals(original.id).count()
-      if (hasAllocations > 0) {
-        throw new LedgerError('جزء من هذه الدفعة اتوزع على بنود بالفعل. لازم تلغي توزيعاتها الأول من تبويب الدفعات')
+      const item = await getAdvanceStatus(original.advanceParentId ?? original.id)
+      if (item.totalPaidQirsh - original.amountQirsh < item.fixedAllocatedQirsh) {
+        throw new LedgerError('جزء من فلوس الدفعة دي اتوزع على بنود بمبلغ ثابت. الغِ التوزيع ده الأول وبعدين الغِ الدفعة')
       }
     }
 
@@ -779,6 +956,7 @@ export async function reverseEntry(entryId: string, reason: string): Promise<Led
       categoryId: original.categoryId,
       affectsVault: original.affectsVault,
       advanceOriginId: original.advanceOriginId,
+      advanceParentId: original.advanceParentId,
       reversalOfId: original.id,
       createdAt: new Date().toISOString(),
     }
@@ -834,11 +1012,35 @@ export async function getFunderStatement(funderId: string): Promise<FunderStatem
   }
 }
 
+/** A بند's part of an item distributed by units/percent (see AdvanceShare). */
+export interface CategoryItemShare {
+  item: AdvanceStatus
+  share: AdvanceShare
+  amountQirsh: number
+}
+
 export interface CategoryStatement {
   category: ExpenseCategory
   totalSpentQirsh: number
   remainingBudgetQirsh: number | null
   entries: LedgerEntry[]
+  itemShares: CategoryItemShare[]
+}
+
+/** What each بند has cost so far: its own entries (direct expenses, payable
+ * settlements, fixed-amount advance allocations) plus its unit/percent
+ * shares of items. The one place this is computed, for every screen. */
+export async function getSpentByCategory(): Promise<Map<string, number>> {
+  const spent = new Map<string, number>()
+  const add = (categoryId: string, qirsh: number) => spent.set(categoryId, (spent.get(categoryId) ?? 0) + qirsh)
+
+  for (const e of await db.ledger.toArray()) {
+    if (e.categoryId) add(e.categoryId, -signedAmount(e)) // expenses are negative signed; spend is positive
+  }
+  for (const item of await listAdvanceItems()) {
+    for (const s of item.shares) add(s.share.categoryId, s.amountQirsh)
+  }
+  return spent
 }
 
 export async function getCategoryStatement(categoryId: string): Promise<CategoryStatement> {
@@ -846,13 +1048,18 @@ export async function getCategoryStatement(categoryId: string): Promise<Category
   if (!category) throw new LedgerError('البند غير موجود')
 
   const entries = await db.ledger.where('categoryId').equals(categoryId).sortBy('date')
-  const totalSpentQirsh = entries.reduce((s, e) => s - signedAmount(e), 0) // expenses are negative signed; spend is positive
+  const itemShares = (await listAdvanceItems()).flatMap((item) =>
+    item.shares.filter((s) => s.share.categoryId === categoryId).map((s) => ({ item, share: s.share, amountQirsh: s.amountQirsh })),
+  )
+  const totalSpentQirsh =
+    entries.reduce((s, e) => s - signedAmount(e), 0) + itemShares.reduce((s, i) => s + i.amountQirsh, 0)
 
   return {
     category,
     totalSpentQirsh,
     remainingBudgetQirsh: category.budgetQirsh > 0 ? category.budgetQirsh - totalSpentQirsh : null,
     entries,
+    itemShares,
   }
 }
 
@@ -869,15 +1076,16 @@ export interface DashboardSummary {
 }
 
 export async function getDashboardSummary(): Promise<DashboardSummary> {
-  const [entries, funders, categories, openPayables, openAdvances] = await Promise.all([
+  const [entries, funders, categories, openPayables, items, spentByCategory] = await Promise.all([
     db.ledger.toArray(),
     db.funders.toArray(),
     db.categories.toArray(),
     listOpenPayables(),
-    listOpenAdvances(),
+    listAdvanceItems(),
+    getSpentByCategory(),
   ])
   const totalPayablesQirsh = openPayables.reduce((s, p) => s + p.remainingQirsh, 0)
-  const totalUnallocatedAdvancesQirsh = openAdvances.reduce((s, a) => s + a.remainingQirsh, 0)
+  const totalUnallocatedAdvancesQirsh = items.reduce((s, i) => s + Math.max(0, i.remainingQirsh), 0)
 
   // Bucket by the entry's own type (not by the sign of signedAmount): a
   // reversed CONTRIBUTION has a negative signedAmount but must still reduce
@@ -892,13 +1100,6 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
     else if (e.affectsVault !== false) totalExpensesQirsh += -signedAmount(e)
   }
 
-  const spentByCategory = new Map<string, number>()
-  for (const e of entries) {
-    if (e.categoryId) {
-      const s = -signedAmount(e) // positive spend contribution (handles reversals correctly)
-      spentByCategory.set(e.categoryId, (spentByCategory.get(e.categoryId) ?? 0) + s)
-    }
-  }
   const topCategories = categories
     .map((c) => ({ category: c, spentQirsh: spentByCategory.get(c.id) ?? 0 }))
     .sort((a, b) => b.spentQirsh - a.spentQirsh)

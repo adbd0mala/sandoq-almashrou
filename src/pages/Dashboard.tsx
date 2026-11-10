@@ -59,7 +59,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (tab: string) => void })
         <button onClick={() => onNavigate('reports')} className="w-full text-right">
           <Card className="bg-sky-50 border-sky-200">
             <div className="flex justify-between items-center">
-              <span className="text-sm text-sky-700">دفعات لسه مش موزعة على بنود</span>
+              <span className="text-sm text-sky-700">أصناف ودفعات لسه مش موزَّعة على بنود</span>
               <span className="font-bold text-sky-800 tabular-nums">{formatEGP(summary.totalUnallocatedAdvancesQirsh)}</span>
             </div>
           </Card>

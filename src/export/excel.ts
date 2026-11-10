@@ -1,7 +1,7 @@
 import * as XLSX from 'xlsx'
 import { PAYMENT_METHOD_LABELS } from '../domain/types'
 import type { CategoryStatement, FunderStatement } from '../domain/ledger'
-import { signedAmount } from '../domain/ledger'
+import { describeItemUnits, signedAmount } from '../domain/ledger'
 import { qirshToEgp } from '../domain/money'
 import type { ExpenseAllocation, Funder, LedgerEntry } from '../domain/types'
 
@@ -12,7 +12,7 @@ function download(wb: XLSX.WorkBook, filename: string) {
 function entryRow(e: LedgerEntry) {
   return {
     التاريخ: e.date,
-    'النوع': e.type === 'CONTRIBUTION' ? 'مساهمة' : e.affectsVault === false ? 'توزيع دفعة' : e.type === 'ADVANCE' ? 'دفعة غير موزعة' : 'مصروف',
+    'النوع': e.type === 'CONTRIBUTION' ? 'مساهمة' : e.affectsVault === false ? 'توزيع دفعة' : e.type === 'ADVANCE' ? 'دفعة صنف' : 'مصروف',
     'الوصف': e.description,
     'المورد/المستفيد': e.counterparty ?? '',
     'طريقة الدفع': e.paymentMethod ? PAYMENT_METHOD_LABELS[e.paymentMethod] : '',
@@ -39,6 +39,19 @@ export function exportCategoryStatementToExcel(stmt: CategoryStatement, filename
   const rows = stmt.entries.map(entryRow)
   const sheet = XLSX.utils.json_to_sheet(rows)
   XLSX.utils.book_append_sheet(wb, sheet, 'الحركات')
+
+  if (stmt.itemShares.length > 0) {
+    const sharesSheet = XLSX.utils.json_to_sheet(
+      stmt.itemShares.map((s) => ({
+        'الصنف': s.item.advance.description,
+        'المورد': s.item.advance.counterparty ?? '',
+        'نصيب البند من الصنف': describeItemUnits(s.item, s.share.units),
+        'ملاحظة': s.share.note ?? '',
+        'القيمة حسب المدفوع حتى الآن (ج.م)': qirshToEgp(s.amountQirsh),
+      })),
+    )
+    XLSX.utils.book_append_sheet(wb, sharesSheet, 'أصناف موزعة')
+  }
 
   download(wb, filename ?? `بند-${stmt.category.name}.xlsx`)
 }

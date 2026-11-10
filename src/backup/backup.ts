@@ -1,7 +1,16 @@
 import { db, ensureSettings, newId } from '../db/db'
-import type { ExpenseAllocation, ExpenseCategory, Funder, LedgerEntry, Payable, PayableSettlement, Settings } from '../domain/types'
+import type {
+  AdvanceShare,
+  ExpenseAllocation,
+  ExpenseCategory,
+  Funder,
+  LedgerEntry,
+  Payable,
+  PayableSettlement,
+  Settings,
+} from '../domain/types'
 
-const BACKUP_FORMAT_VERSION = 2
+const BACKUP_FORMAT_VERSION = 3
 const MAX_AUTO_SNAPSHOTS = 14
 
 export interface BackupPayload {
@@ -14,10 +23,11 @@ export interface BackupPayload {
   settings: Settings
   payables: Payable[]
   payableSettlements: PayableSettlement[]
+  advanceShares: AdvanceShare[]
 }
 
 export async function buildBackupPayload(): Promise<BackupPayload> {
-  const [funders, categories, ledger, allocations, settings, payables, payableSettlements] = await Promise.all([
+  const [funders, categories, ledger, allocations, settings, payables, payableSettlements, advanceShares] = await Promise.all([
     db.funders.toArray(),
     db.categories.toArray(),
     db.ledger.toArray(),
@@ -25,6 +35,7 @@ export async function buildBackupPayload(): Promise<BackupPayload> {
     ensureSettings(),
     db.payables.toArray(),
     db.payableSettlements.toArray(),
+    db.advanceShares.toArray(),
   ])
   return {
     formatVersion: BACKUP_FORMAT_VERSION,
@@ -36,6 +47,7 @@ export async function buildBackupPayload(): Promise<BackupPayload> {
     settings,
     payables,
     payableSettlements,
+    advanceShares,
   }
 }
 
@@ -58,9 +70,9 @@ export class BackupValidationError extends Error {}
 function validatePayload(data: unknown): BackupPayload {
   if (!data || typeof data !== 'object') throw new BackupValidationError('ملف النسخة الاحتياطية غير صالح')
   const d = data as Record<string, unknown>
-  // Version 1 backups (from before supplier payables existed) are still
-  // restorable — they simply have no payables/payableSettlements rows.
-  if (d.formatVersion !== 1 && d.formatVersion !== BACKUP_FORMAT_VERSION) {
+  // Older backups stay restorable: version 1 predates supplier payables and
+  // version 2 predates item shares — they simply have no rows for those.
+  if (typeof d.formatVersion !== 'number' || d.formatVersion < 1 || d.formatVersion > BACKUP_FORMAT_VERSION) {
     throw new BackupValidationError('إصدار ملف النسخة الاحتياطية غير متوافق')
   }
   for (const key of ['funders', 'categories', 'ledger', 'allocations']) {
@@ -71,10 +83,14 @@ function validatePayload(data: unknown): BackupPayload {
   if (d.payableSettlements !== undefined && !Array.isArray(d.payableSettlements)) {
     throw new BackupValidationError('الملف تالف: حقل سدادات المستحقات غير صالح')
   }
+  if (d.advanceShares !== undefined && !Array.isArray(d.advanceShares)) {
+    throw new BackupValidationError('الملف تالف: حقل توزيع الأصناف غير صالح')
+  }
   return {
     ...(d as unknown as BackupPayload),
     payables: (d.payables as Payable[] | undefined) ?? [],
     payableSettlements: (d.payableSettlements as PayableSettlement[] | undefined) ?? [],
+    advanceShares: (d.advanceShares as AdvanceShare[] | undefined) ?? [],
   }
 }
 
@@ -86,7 +102,7 @@ export async function restoreFromPayload(raw: unknown): Promise<void> {
 
   await db.transaction(
     'rw',
-    [db.funders, db.categories, db.ledger, db.allocations, db.settings, db.payables, db.payableSettlements],
+    [db.funders, db.categories, db.ledger, db.allocations, db.settings, db.payables, db.payableSettlements, db.advanceShares],
     async () => {
       await Promise.all([
         db.funders.clear(),
@@ -96,6 +112,7 @@ export async function restoreFromPayload(raw: unknown): Promise<void> {
         db.settings.clear(),
         db.payables.clear(),
         db.payableSettlements.clear(),
+        db.advanceShares.clear(),
       ])
       await Promise.all([
         db.funders.bulkAdd(payload.funders),
@@ -105,6 +122,7 @@ export async function restoreFromPayload(raw: unknown): Promise<void> {
         db.settings.add(payload.settings),
         payload.payables.length ? db.payables.bulkAdd(payload.payables) : Promise.resolve(),
         payload.payableSettlements.length ? db.payableSettlements.bulkAdd(payload.payableSettlements) : Promise.resolve(),
+        payload.advanceShares.length ? db.advanceShares.bulkAdd(payload.advanceShares) : Promise.resolve(),
       ])
     },
   )
@@ -156,7 +174,7 @@ const AUTO_BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000
 export async function runDailyAutoBackupIfDue(): Promise<void> {
   await db.transaction(
     'rw',
-    [db.settings, db.backups, db.funders, db.categories, db.ledger, db.allocations, db.payables, db.payableSettlements],
+    [db.settings, db.backups, db.funders, db.categories, db.ledger, db.allocations, db.payables, db.payableSettlements, db.advanceShares],
     async () => {
       const settings = await ensureSettings()
       const lastMs = settings.lastAutoBackupAt ? new Date(settings.lastAutoBackupAt).getTime() : 0
