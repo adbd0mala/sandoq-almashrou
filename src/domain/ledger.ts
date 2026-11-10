@@ -10,13 +10,13 @@ const SHARE_TOLERANCE = 0.01
 // Funders & shares
 // ---------------------------------------------------------------------------
 
+/** Oldest first. Ids are random, so the table's own order would look shuffled. */
 export async function listFunders(): Promise<Funder[]> {
-  return db.funders.toArray()
+  return (await db.funders.toArray()).sort((a, b) => a.createdAt.localeCompare(b.createdAt))
 }
 
 export async function listActiveFunders(): Promise<Funder[]> {
-  const all = await db.funders.toArray()
-  return all.filter((f) => f.active).sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  return (await listFunders()).filter((f) => f.active)
 }
 
 /**
@@ -117,8 +117,9 @@ export async function updateFunderInfo(
 // Expense categories
 // ---------------------------------------------------------------------------
 
+/** Oldest first, for the same reason as listFunders. */
 export async function listCategories(): Promise<ExpenseCategory[]> {
-  return db.categories.toArray()
+  return (await db.categories.toArray()).sort((a, b) => a.createdAt.localeCompare(b.createdAt))
 }
 
 export async function addCategory(input: { name: string; description?: string; budgetQirsh?: number }): Promise<ExpenseCategory> {

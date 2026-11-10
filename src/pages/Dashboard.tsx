@@ -4,7 +4,13 @@ import { formatEGP } from '../domain/money'
 import { Card, EmptyState, PageTitle } from '../components/ui'
 import { PAYMENT_METHOD_LABELS } from '../domain/types'
 
-export function Dashboard({ onNavigate }: { onNavigate: (tab: string) => void }) {
+export function Dashboard({
+  onNavigate,
+  onOpenReport,
+}: {
+  onNavigate: (tab: string) => void
+  onOpenReport: (tab: 'payables' | 'items') => void
+}) {
   const summary = useLiveQuery(getDashboardSummary, [])
 
   if (!summary) return null
@@ -45,7 +51,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (tab: string) => void })
       </div>
 
       {summary.totalPayablesQirsh > 0 && (
-        <button onClick={() => onNavigate('reports')} className="w-full text-right">
+        <button onClick={() => onOpenReport('payables')} className="w-full text-right">
           <Card className="bg-amber-50 border-amber-200">
             <div className="flex justify-between items-center">
               <span className="text-sm text-amber-700">مستحقات مفتوحة لموردين</span>
@@ -56,7 +62,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (tab: string) => void })
       )}
 
       {summary.totalUnallocatedAdvancesQirsh > 0 && (
-        <button onClick={() => onNavigate('reports')} className="w-full text-right">
+        <button onClick={() => onOpenReport('items')} className="w-full text-right">
           <Card className="bg-sky-50 border-sky-200">
             <div className="flex justify-between items-center">
               <span className="text-sm text-sky-700">أصناف ودفعات لسه مش موزَّعة على بنود</span>

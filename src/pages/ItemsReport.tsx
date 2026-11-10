@@ -1,12 +1,12 @@
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useState } from 'react'
-import { db } from '../db/db'
 import {
   LedgerError,
   addAdvanceShares,
   allocateAdvance,
   describeItemUnits,
   listAdvanceItems,
+  listCategories,
   recordAdvancePayment,
   removeAdvanceShare,
   reverseEntry,
@@ -23,7 +23,7 @@ const errorText = (e: unknown) => (e instanceof LedgerError ? e.message : 'حد�
  * known: what was paid for each, how it's split across بنود, what's left. */
 export function ItemsReport() {
   const items = useLiveQuery(listAdvanceItems, [])
-  const categories = useLiveQuery(() => db.categories.toArray(), [])
+  const categories = useLiveQuery(listCategories, [])
   const [distributingId, setDistributingId] = useState<string | null>(null)
   const [payingId, setPayingId] = useState<string | null>(null)
   const [showDone, setShowDone] = useState(false)

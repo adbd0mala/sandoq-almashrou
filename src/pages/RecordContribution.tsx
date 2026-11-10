@@ -1,7 +1,6 @@
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useState } from 'react'
-import { db } from '../db/db'
-import { LedgerError, recordContribution } from '../domain/ledger'
+import { LedgerError, listActiveFunders, recordContribution } from '../domain/ledger'
 import { egpToQirsh } from '../domain/money'
 import { Banner, Button, Card, Field, PageTitle, inputClass } from '../components/ui'
 import { PAYMENT_METHOD_LABELS, type PaymentMethod } from '../domain/types'
@@ -9,7 +8,7 @@ import { PAYMENT_METHOD_LABELS, type PaymentMethod } from '../domain/types'
 const todayIso = () => new Date().toISOString().slice(0, 10)
 
 export function RecordContribution({ onDone }: { onDone: () => void }) {
-  const activeFunders = useLiveQuery(async () => (await db.funders.toArray()).filter((f) => f.active), [])
+  const activeFunders = useLiveQuery(listActiveFunders, [])
 
   const [funderId, setFunderId] = useState('')
   const [amount, setAmount] = useState('')

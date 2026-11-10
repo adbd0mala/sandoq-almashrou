@@ -1,22 +1,19 @@
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useState } from 'react'
-import { db } from '../db/db'
-import { LedgerError, addFunder, archiveFunder, setCustomShares, unarchiveFunder, updateFunderInfo } from '../domain/ledger'
+import { LedgerError, addFunder, archiveFunder, listFunders, setCustomShares, unarchiveFunder, updateFunderInfo } from '../domain/ledger'
 import { egpToQirsh, roundPercentsForDisplay } from '../domain/money'
 import { Banner, Button, Card, EmptyState, Field, Modal, PageTitle, inputClass } from '../components/ui'
 import type { Funder } from '../domain/types'
 
 export function Funders() {
-  const funders = useLiveQuery(() => db.funders.toArray(), [])
+  const funders = useLiveQuery(listFunders, [])
   const [showAdd, setShowAdd] = useState(false)
   const [showShares, setShowShares] = useState(false)
   const [editing, setEditing] = useState<Funder | null>(null)
   const [error, setError] = useState('')
 
-  // Oldest first — ids are random, so the table's own order looks shuffled.
-  const ordered = [...(funders ?? [])].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-  const active = ordered.filter((f) => f.active)
-  const archived = ordered.filter((f) => !f.active)
+  const active = (funders ?? []).filter((f) => f.active)
+  const archived = (funders ?? []).filter((f) => !f.active)
   const shareSum = active.reduce((s, f) => s + f.sharePercent, 0)
 
   return (

@@ -1,13 +1,12 @@
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useState } from 'react'
-import { db } from '../db/db'
-import { LedgerError, addCategory, archiveCategory, deleteCategoryIfUnused, getSpentByCategory, updateCategory } from '../domain/ledger'
+import { LedgerError, addCategory, archiveCategory, deleteCategoryIfUnused, getSpentByCategory, listCategories, updateCategory } from '../domain/ledger'
 import { egpToQirsh, formatEGP } from '../domain/money'
 import { Banner, Button, Card, EmptyState, Field, Modal, PageTitle, inputClass } from '../components/ui'
 import type { ExpenseCategory } from '../domain/types'
 
 export function Categories({ onOpenStatement }: { onOpenStatement: (categoryId: string) => void }) {
-  const categories = useLiveQuery(() => db.categories.toArray(), [])
+  const categories = useLiveQuery(listCategories, [])
   const spentByCategory = useLiveQuery(getSpentByCategory, [])
 
   const [showAdd, setShowAdd] = useState(false)

@@ -1,9 +1,9 @@
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useState } from 'react'
-import { db } from '../db/db'
 import {
   LedgerError,
   getVaultBalanceQirsh,
+  listCategories,
   recordAdvance,
   recordExpense,
   recordExpenseWithPayable,
@@ -19,7 +19,7 @@ const todayIso = () => new Date().toISOString().slice(0, 10)
 type Mode = 'single' | 'split' | 'advance'
 
 export function RecordExpense({ onDone }: { onDone: () => void }) {
-  const activeCategories = useLiveQuery(async () => (await db.categories.toArray()).filter((c) => c.active), [])
+  const activeCategories = useLiveQuery(async () => (await listCategories()).filter((c) => c.active), [])
   const balanceQirsh = useLiveQuery(getVaultBalanceQirsh, [])
   const [mode, setMode] = useState<Mode>('single')
 

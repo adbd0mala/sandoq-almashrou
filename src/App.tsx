@@ -4,7 +4,7 @@ import { Funders } from './pages/Funders'
 import { Categories } from './pages/Categories'
 import { RecordExpense } from './pages/RecordExpense'
 import { RecordContribution } from './pages/RecordContribution'
-import { Reports } from './pages/Reports'
+import { Reports, type ReportsTab } from './pages/Reports'
 import { BackupPage } from './pages/BackupPage'
 import { runDailyAutoBackupIfDue } from './backup/backup'
 
@@ -21,6 +21,7 @@ const NAV: { tab: Tab; label: string; icon: string }[] = [
 export default function App() {
   const [tab, setTab] = useState<Tab>('home')
   const [reportCategoryId, setReportCategoryId] = useState<string | undefined>(undefined)
+  const [reportsTab, setReportsTab] = useState<ReportsTab | undefined>(undefined)
 
   useEffect(() => {
     const tryBackup = () =>
@@ -38,18 +39,25 @@ export default function App() {
 
   function openCategoryStatement(categoryId: string) {
     setReportCategoryId(categoryId)
+    setReportsTab(undefined)
+    setTab('reports')
+  }
+
+  function openReport(reportTab: ReportsTab) {
+    setReportCategoryId(undefined)
+    setReportsTab(reportTab)
     setTab('reports')
   }
 
   return (
     <div className="min-h-screen bg-slate-50 pb-20" dir="rtl">
       <div className="max-w-md mx-auto px-4 pt-5">
-        {tab === 'home' && <Dashboard onNavigate={(t) => setTab(t as Tab)} />}
+        {tab === 'home' && <Dashboard onNavigate={(t) => setTab(t as Tab)} onOpenReport={openReport} />}
         {tab === 'expense' && <RecordExpense onDone={() => setTab('home')} />}
         {tab === 'contribution' && <RecordContribution onDone={() => setTab('home')} />}
         {tab === 'funders' && <Funders />}
         {tab === 'categories' && <Categories onOpenStatement={openCategoryStatement} />}
-        {tab === 'reports' && <Reports initialCategoryId={reportCategoryId} />}
+        {tab === 'reports' && <Reports initialCategoryId={reportCategoryId} initialTab={reportsTab} />}
         {tab === 'backup' && <BackupPage />}
       </div>
 
@@ -58,7 +66,10 @@ export default function App() {
           <button
             key={n.tab}
             onClick={() => {
-              if (n.tab === 'reports') setReportCategoryId(undefined)
+              if (n.tab === 'reports') {
+                setReportCategoryId(undefined)
+                setReportsTab(undefined)
+              }
               setTab(n.tab)
             }}
             className={`flex-1 py-2.5 flex flex-col items-center gap-0.5 text-xs ${

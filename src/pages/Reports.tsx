@@ -7,6 +7,8 @@ import {
   getCategoryStatement,
   getFunderStatement,
   getDashboardSummary,
+  listCategories,
+  listFunders,
   listOpenPayables,
   reverseEntry,
   settlePayable,
@@ -20,20 +22,20 @@ import { Banner, Button, Card, EmptyState, Field, PageTitle, inputClass } from '
 import { PAYMENT_METHOD_LABELS, type LedgerEntry, type PaymentMethod } from '../domain/types'
 import { ItemsReport } from './ItemsReport'
 
-type Tab = 'full' | 'funder' | 'category' | 'payables' | 'items'
+export type ReportsTab = 'full' | 'funder' | 'category' | 'payables' | 'items'
 
 // xlsx / jspdf / html2canvas are heavy — load them only when an export button
 // is actually pressed instead of bloating the app's initial bundle.
 const loadExcel = () => import('../export/excel')
 const loadPdf = () => import('../export/pdf')
 
-export function Reports({ initialCategoryId }: { initialCategoryId?: string }) {
-  const [tab, setTab] = useState<Tab>(initialCategoryId ? 'category' : 'full')
+export function Reports({ initialCategoryId, initialTab }: { initialCategoryId?: string; initialTab?: ReportsTab }) {
+  const [tab, setTab] = useState<ReportsTab>(initialTab ?? (initialCategoryId ? 'category' : 'full'))
 
   return (
     <div className="space-y-4">
       <PageTitle>التقارير</PageTitle>
-      <div className="flex gap-2 bg-slate-100 rounded-xl p-1 overflow-x-auto">
+      <div className="grid grid-cols-6 gap-1 bg-slate-100 rounded-xl p-1">
         <TabButton active={tab === 'full'} onClick={() => setTab('full')}>
           تقرير شامل
         </TabButton>
@@ -43,10 +45,10 @@ export function Reports({ initialCategoryId }: { initialCategoryId?: string }) {
         <TabButton active={tab === 'category'} onClick={() => setTab('category')}>
           كشف بند
         </TabButton>
-        <TabButton active={tab === 'payables'} onClick={() => setTab('payables')}>
+        <TabButton wide active={tab === 'payables'} onClick={() => setTab('payables')}>
           المستحقات للموردين
         </TabButton>
-        <TabButton active={tab === 'items'} onClick={() => setTab('items')}>
+        <TabButton wide active={tab === 'items'} onClick={() => setTab('items')}>
           الأصناف والدفعات
         </TabButton>
       </div>
@@ -60,11 +62,21 @@ export function Reports({ initialCategoryId }: { initialCategoryId?: string }) {
   )
 }
 
-function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+function TabButton({
+  active,
+  wide,
+  onClick,
+  children,
+}: {
+  active: boolean
+  wide?: boolean
+  onClick: () => void
+  children: React.ReactNode
+}) {
   return (
     <button
       onClick={onClick}
-      className={`shrink-0 whitespace-nowrap px-3 py-2 rounded-lg text-sm font-semibold transition ${active ? 'bg-white shadow text-teal-700' : 'text-slate-500'}`}
+      className={`${wide ? 'col-span-3' : 'col-span-2'} px-1 py-2 rounded-lg text-sm leading-tight font-semibold transition ${active ? 'bg-white shadow text-teal-700' : 'text-slate-500'}`}
     >
       {children}
     </button>
@@ -140,7 +152,7 @@ function EntryRow({ entry, onReversed }: { entry: LedgerEntry; onReversed: () =>
 function FullProjectReport() {
   const printRef = useRef<HTMLDivElement>(null)
   const summary = useLiveQuery(getDashboardSummary, [])
-  const funders = useLiveQuery(() => db.funders.toArray(), [])
+  const funders = useLiveQuery(listFunders, [])
   const entries = useLiveQuery(() => db.ledger.toArray(), [])
   const allocations = useLiveQuery(() => db.allocations.toArray(), [])
 
@@ -244,7 +256,7 @@ function FullProjectReport() {
 }
 
 function FunderReport() {
-  const funders = useLiveQuery(() => db.funders.toArray(), [])
+  const funders = useLiveQuery(listFunders, [])
   const [funderId, setFunderId] = useState('')
   const [stmt, setStmt] = useState<FunderStatement | null>(null)
   const printRef = useRef<HTMLDivElement>(null)
@@ -325,7 +337,7 @@ function FunderReport() {
 }
 
 function CategoryReport({ initialCategoryId }: { initialCategoryId?: string }) {
-  const categories = useLiveQuery(() => db.categories.toArray(), [])
+  const categories = useLiveQuery(listCategories, [])
   const [categoryId, setCategoryId] = useState(initialCategoryId ?? '')
   const [stmt, setStmt] = useState<CategoryStatement | null>(null)
   const printRef = useRef<HTMLDivElement>(null)
