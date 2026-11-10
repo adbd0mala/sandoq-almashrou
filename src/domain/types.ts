@@ -71,6 +71,10 @@ export interface LedgerEntry {
    * what the item costs in total. Not money that moved — just what lets
    * "still owed to the supplier" be shown as this minus what's been paid. */
   agreedTotalQirsh?: number
+  /** When the entry's wording (description, date, supplier, payment method,
+   * invoice number) was last corrected. Its amount, بند and funder can never
+   * be edited — only reversed — so this never marks a change in money. */
+  editedAt?: string
 }
 
 /** One بند's share of an item (an ADVANCE and its follow-up payments),

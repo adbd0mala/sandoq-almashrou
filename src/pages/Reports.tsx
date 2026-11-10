@@ -8,18 +8,20 @@ import {
   getFunderStatement,
   getDashboardSummary,
   listAdvanceItems,
+  listAllPayables,
   listCategories,
   listFunders,
-  listOpenPayables,
   reverseEntry,
   settlePayable,
   signedAmount,
+  updatePayable,
   type CategoryStatement,
   type FunderStatement,
   type PayableStatus,
 } from '../domain/ledger'
-import { egpToQirsh, formatEGP } from '../domain/money'
-import { Banner, Button, Card, EmptyState, Field, PageTitle, inputClass } from '../components/ui'
+import { egpToQirsh, formatEGP, formatUnits } from '../domain/money'
+import { Banner, Button, Card, EmptyState, Field, Modal, PageTitle, inputClass } from '../components/ui'
+import { EditEntryModal } from '../components/EditEntryModal'
 import { PAYMENT_METHOD_LABELS, type LedgerEntry, type PaymentMethod } from '../domain/types'
 import { ItemsReport } from './ItemsReport'
 
@@ -84,8 +86,11 @@ function TabButton({
   )
 }
 
-function EntryRow({ entry, onReversed }: { entry: LedgerEntry; onReversed: () => void }) {
+/** One ledger row in a statement. `onChanged` reloads the statement after
+ * the entry is cancelled or its details are corrected. */
+function EntryRow({ entry, onChanged }: { entry: LedgerEntry; onChanged: () => void }) {
   const [confirming, setConfirming] = useState(false)
+  const [editing, setEditing] = useState(false)
   const [reason, setReason] = useState('')
   const [error, setError] = useState('')
   const canReverse = !entry.reversalOfId && !entry.reversed
@@ -94,7 +99,7 @@ function EntryRow({ entry, onReversed }: { entry: LedgerEntry; onReversed: () =>
     try {
       await reverseEntry(entry.id, reason)
       setConfirming(false)
-      onReversed()
+      onChanged()
     } catch (e) {
       setError(e instanceof LedgerError ? e.message : 'حدث خطأ غير متوقع')
     }
@@ -113,20 +118,28 @@ function EntryRow({ entry, onReversed }: { entry: LedgerEntry; onReversed: () =>
           </span>
         )}
       </div>
-      <div className="text-xs text-slate-400 mt-0.5 flex items-center justify-between">
+      <div className="text-xs text-slate-400 mt-0.5 flex items-center justify-between gap-2">
         <span>
           {entry.date} {entry.paymentMethod ? `· ${PAYMENT_METHOD_LABELS[entry.paymentMethod]}` : ''}
+          {entry.counterparty ? ` · ${entry.counterparty}` : ''}
           {entry.invoiceNumber ? ` · فاتورة ${entry.invoiceNumber}` : ''}
           {entry.affectsVault === false && ' · توزيع من دفعة سابقة'}
+          {entry.editedAt && ' · بياناتها اتعدّلت'}
           {entry.reversed && ' · (ملغاة)'}
           {entry.reversalOfId && ' · حركة إلغاء'}
         </span>
         {canReverse && (
-          <button className="text-red-500 no-print" onClick={() => setConfirming(true)}>
-            إلغاء الحركة
-          </button>
+          <span className="shrink-0 flex gap-3 no-print">
+            <button className="text-teal-700" onClick={() => setEditing(true)}>
+              تعديل
+            </button>
+            <button className="text-red-500" onClick={() => setConfirming(true)}>
+              إلغاء الحركة
+            </button>
+          </span>
         )}
       </div>
+      {editing && <EditEntryModal entry={entry} onClose={() => setEditing(false)} onSaved={onChanged} />}
       {confirming && (
         <div className="mt-2 bg-red-50 rounded-lg p-2 space-y-2 no-print">
           {error && <div className="text-red-600 text-xs">{error}</div>}
@@ -326,7 +339,7 @@ function FunderReport() {
             ) : (
               <ul className="divide-y divide-slate-100">
                 {stmt.entries.map((e) => (
-                  <EntryRow key={e.id} entry={e} onReversed={() => load(funderId)} />
+                  <EntryRow key={e.id} entry={e} onChanged={() => load(funderId)} />
                 ))}
               </ul>
             )}
@@ -410,7 +423,7 @@ function CategoryReport({ initialCategoryId }: { initialCategoryId?: string }) {
             ) : (
               <ul className="divide-y divide-slate-100">
                 {stmt.entries.map((e) => (
-                  <EntryRow key={e.id} entry={e} onReversed={() => load(categoryId)} />
+                  <EntryRow key={e.id} entry={e} onChanged={() => load(categoryId)} />
                 ))}
               </ul>
             )}
@@ -441,51 +454,68 @@ function CategoryReport({ initialCategoryId }: { initialCategoryId?: string }) {
 }
 
 function PayablesReport({ onOpenItems }: { onOpenItems: () => void }) {
-  const payables = useLiveQuery(listOpenPayables, [])
+  const payables = useLiveQuery(listAllPayables, [])
   const items = useLiveQuery(listAdvanceItems, [])
-  const [settling, setSettling] = useState<PayableStatus | null>(null)
+  const [settlingId, setSettlingId] = useState<string | null>(null)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [showClosed, setShowClosed] = useState(false)
 
   if (!payables || !items) return null
 
+  const open = payables.filter((p) => p.remainingQirsh > 0).sort((a, b) => a.payable.date.localeCompare(b.payable.date))
+  const closed = payables.filter((p) => p.remainingQirsh <= 0)
   // Items whose full price is known and not fully paid are owed to a supplier too.
   const owedItems = items.filter((i) => (i.owedQirsh ?? 0) > 0)
+  const settling = payables.find((p) => p.payable.id === settlingId)
+  const editing = payables.find((p) => p.payable.id === editingId)
 
-  if (payables.length === 0 && owedItems.length === 0) {
-    return (
-      <Card>
-        <EmptyState>
-          مفيش مستحقات مفتوحة لموردين دلوقتي. هيظهر هنا أي مصروف بدفعة جزئية، وأي صنف مسجّل له إجمالي حساب ولسه عليه باقي
-        </EmptyState>
-      </Card>
-    )
-  }
+  const totalRemaining = open.reduce((s, p) => s + p.remainingQirsh, 0) + owedItems.reduce((s, i) => s + (i.owedQirsh ?? 0), 0)
 
-  const totalRemaining = payables.reduce((s, p) => s + p.remainingQirsh, 0) + owedItems.reduce((s, i) => s + (i.owedQirsh ?? 0), 0)
+  const payableCard = (p: PayableStatus) => (
+    <Card key={p.payable.id}>
+      <div className="flex justify-between items-start gap-2">
+        <div className="min-w-0">
+          <div className="font-semibold text-slate-800 break-words">{p.payable.supplierName}</div>
+          <div className="text-xs text-slate-400">
+            {p.payable.description} · {p.payable.date}
+          </div>
+        </div>
+        {p.remainingQirsh > 0 ? (
+          <span className="text-amber-700 font-bold tabular-nums shrink-0">{formatEGP(p.remainingQirsh)}</span>
+        ) : (
+          <span className="text-emerald-600 font-semibold shrink-0">خالص</span>
+        )}
+      </div>
+      <div className="text-xs text-slate-500 mt-2">
+        إجمالي الفاتورة: {formatEGP(p.payable.totalQirsh)} · المدفوع: {formatEGP(p.paidQirsh)}
+      </div>
+      <button className="text-teal-700 text-xs font-semibold mt-1" onClick={() => setEditingId(p.payable.id)}>
+        تعديل اسم المورد أو إجمالي الفاتورة
+      </button>
+      {p.remainingQirsh > 0 && (
+        <Button variant="secondary" className="w-full mt-3" onClick={() => setSettlingId(p.payable.id)}>
+          سداد جزء أو كل الباقي
+        </Button>
+      )}
+    </Card>
+  )
 
   return (
     <div className="space-y-3">
-      <Card className="bg-amber-50 border-amber-200">
-        <div className="text-sm text-amber-700">إجمالي المستحق لكل الموردين</div>
-        <div className="text-xl font-bold text-amber-800">{formatEGP(totalRemaining)}</div>
-      </Card>
-
-      {payables.map((p) => (
-        <Card key={p.payable.id}>
-          <div className="flex justify-between items-start">
-            <div>
-              <div className="font-semibold text-slate-800">{p.payable.supplierName}</div>
-              <div className="text-xs text-slate-400">{p.payable.description} · {p.payable.date}</div>
-            </div>
-            <span className="text-amber-700 font-bold tabular-nums">{formatEGP(p.remainingQirsh)}</span>
-          </div>
-          <div className="text-xs text-slate-500 mt-2">
-            إجمالي الفاتورة: {formatEGP(p.payable.totalQirsh)} · المدفوع: {formatEGP(p.paidQirsh)}
-          </div>
-          <Button variant="secondary" className="w-full mt-3" onClick={() => setSettling(p)}>
-            سداد جزء أو كل الباقي
-          </Button>
+      {open.length === 0 && owedItems.length === 0 ? (
+        <Card>
+          <EmptyState>
+            مفيش مستحقات مفتوحة لموردين دلوقتي. هيظهر هنا أي مصروف بدفعة جزئية، وأي صنف مسجّل له إجمالي حساب ولسه عليه باقي
+          </EmptyState>
         </Card>
-      ))}
+      ) : (
+        <Card className="bg-amber-50 border-amber-200">
+          <div className="text-sm text-amber-700">إجمالي المستحق لكل الموردين</div>
+          <div className="text-xl font-bold text-amber-800">{formatEGP(totalRemaining)}</div>
+        </Card>
+      )}
+
+      {open.map(payableCard)}
 
       {owedItems.map((i) => (
         <Card key={i.advance.id}>
@@ -507,8 +537,68 @@ function PayablesReport({ onOpenItems }: { onOpenItems: () => void }) {
         </Card>
       ))}
 
-      {settling && <SettlePayableModal status={settling} onClose={() => setSettling(null)} />}
+      {closed.length > 0 && (
+        <>
+          <button className="text-sm text-teal-700 font-semibold" onClick={() => setShowClosed((v) => !v)}>
+            {showClosed ? 'إخفاء' : 'عرض'} المستحقات اللي اتسددت بالكامل ({formatUnits(closed.length)})
+          </button>
+          {showClosed && closed.map(payableCard)}
+        </>
+      )}
+
+      {settling && <SettlePayableModal key={settling.payable.id} status={settling} onClose={() => setSettlingId(null)} />}
+      {editing && <EditPayableModal key={editing.payable.id} status={editing} onClose={() => setEditingId(null)} />}
     </div>
+  )
+}
+
+/** Corrects a payable's supplier name or invoice total — e.g. the supplier's
+ * final bill came out higher or lower than what was first recorded. */
+function EditPayableModal({ status, onClose }: { status: PayableStatus; onClose: () => void }) {
+  const [supplierName, setSupplierName] = useState(status.payable.supplierName)
+  const [total, setTotal] = useState(String(status.payable.totalQirsh / 100))
+  const [error, setError] = useState('')
+
+  const totalQirsh = Number(total) > 0 ? egpToQirsh(Number(total)) : 0
+  const belowPaid = totalQirsh > 0 && totalQirsh < status.paidQirsh
+
+  async function save() {
+    setError('')
+    try {
+      await updatePayable(status.payable.id, { supplierName, totalQirsh })
+      onClose()
+    } catch (e) {
+      setError(e instanceof LedgerError ? e.message : 'حدث خطأ غير متوقع')
+    }
+  }
+
+  return (
+    <Modal open onClose={onClose} title="تعديل المستحق">
+      {error && <Banner kind="error">{error}</Banner>}
+      <Field label="اسم المورد">
+        <input className={inputClass} value={supplierName} maxLength={80} onChange={(e) => setSupplierName(e.target.value)} />
+      </Field>
+      <Field label="إجمالي الفاتورة (ج.م)">
+        <input type="number" inputMode="decimal" className={inputClass} value={total} onChange={(e) => setTotal(e.target.value)} />
+      </Field>
+      {belowPaid ? (
+        <p className="text-xs text-red-600 -mt-2 mb-3">الإجمالي أقل من المدفوع فعلاً ({formatEGP(status.paidQirsh)})</p>
+      ) : (
+        totalQirsh > 0 && (
+          <p className="text-xs text-slate-500 -mt-2 mb-3">
+            المدفوع: {formatEGP(status.paidQirsh)} · الباقي للمورد بعد التعديل: {formatEGP(totalQirsh - status.paidQirsh)}
+          </p>
+        )
+      )}
+      <div className="flex gap-2">
+        <Button className="flex-1" onClick={save} disabled={!supplierName.trim() || totalQirsh <= 0 || belowPaid}>
+          حفظ التعديل
+        </Button>
+        <Button variant="secondary" onClick={onClose}>
+          رجوع
+        </Button>
+      </div>
+    </Modal>
   )
 }
 

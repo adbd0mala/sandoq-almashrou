@@ -11,11 +11,13 @@ import {
   removeAdvanceShare,
   reverseEntry,
   setAdvanceAgreedTotal,
+  updateAdvanceItem,
   type AdvanceStatus,
 } from '../domain/ledger'
 import { egpToQirsh, formatEGP, formatUnits } from '../domain/money'
 import { Banner, Button, Card, EmptyState, Field, Modal, inputClass } from '../components/ui'
-import { PAYMENT_METHOD_LABELS, type ExpenseCategory, type PaymentMethod } from '../domain/types'
+import { EditEntryModal } from '../components/EditEntryModal'
+import { PAYMENT_METHOD_LABELS, type ExpenseCategory, type LedgerEntry, type PaymentMethod } from '../domain/types'
 
 const todayIso = () => new Date().toISOString().slice(0, 10)
 const errorText = (e: unknown) => (e instanceof LedgerError ? e.message : 'حدث خطأ غير متوقع')
@@ -114,6 +116,8 @@ function ItemCard({
   onPay: () => void
 }) {
   const [showPayments, setShowPayments] = useState(false)
+  const [editingItem, setEditingItem] = useState(false)
+  const [editingPayment, setEditingPayment] = useState<LedgerEntry | null>(null)
   const { advance } = item
   const fixedRows = item.allocationEntries.filter((e) => !e.reversalOfId && !e.reversed)
   const usesShares = item.hasQuantity || item.shares.length > 0
@@ -128,6 +132,9 @@ function ItemCard({
             {advance.counterparty ? `${advance.counterparty} · ` : ''}
             {advance.date}
           </div>
+          <button className="text-teal-700 text-xs font-semibold mt-1" onClick={() => setEditingItem(true)}>
+            تعديل بيانات الصنف
+          </button>
         </div>
         {item.hasQuantity && (
           <span className="shrink-0 text-xs font-semibold bg-slate-100 text-slate-600 rounded-lg px-2 py-1">
@@ -219,7 +226,16 @@ function ItemCard({
                   {formatEGP(p.amountQirsh)}
                 </span>
               </div>
-              {p.reversed ? <span className="text-xs text-slate-400">ملغاة</span> : <ReverseControl entryId={p.id} label="إلغاء الدفعة دي" />}
+              {p.reversed ? (
+                <span className="text-xs text-slate-400">ملغاة</span>
+              ) : (
+                <>
+                  <button className="text-teal-700 text-xs mt-0.5 ml-3" onClick={() => setEditingPayment(p)}>
+                    تعديل
+                  </button>
+                  <ReverseControl entryId={p.id} label="إلغاء الدفعة دي" />
+                </>
+              )}
             </li>
           ))}
         </ul>
@@ -236,7 +252,96 @@ function ItemCard({
         </Button>
       </div>
       {canDistribute && !hasCategories && <div className="text-xs text-red-500 mt-2">أضف بند مصروفات أولاً عشان تقدر توزّع الصنف ده</div>}
+
+      {editingItem && <EditItemModal item={item} onClose={() => setEditingItem(false)} />}
+      {editingPayment && <EditEntryModal entry={editingPayment} onClose={() => setEditingPayment(null)} />}
     </Card>
+  )
+}
+
+/** Corrects an item's name, supplier, quantity or unit. Money never moves
+ * here: what each بند carries is derived from the item's payments. */
+function EditItemModal({ item, onClose }: { item: AdvanceStatus; onClose: () => void }) {
+  const { advance } = item
+  const [name, setName] = useState(advance.description)
+  const [counterparty, setCounterparty] = useState(advance.counterparty ?? '')
+  const [quantity, setQuantity] = useState(item.hasQuantity ? String(advance.quantity) : '')
+  const [unitName, setUnitName] = useState(advance.unitName ?? '')
+  const [error, setError] = useState('')
+
+  // An item split by fixed amounts has no use for a quantity, so it isn't offered.
+  const fixedOnly = item.fixedAllocatedQirsh > 0
+  const quantityValue = quantity.trim() === '' ? null : Number(quantity)
+  const quantityInvalid = quantityValue !== null && !(quantityValue > 0)
+  const distributedUnits = item.shares.reduce((s, c) => s + c.share.units, 0)
+  const quantityHint = fixedOnly
+    ? undefined
+    : item.shares.length === 0
+      ? 'لو كتبت كمية، الصنف بيتوزّع على البنود بعدد الوحدات. لو سبتها فاضية بيتوزّع بالنسبة أو بالمبلغ'
+      : item.hasQuantity
+        ? `متوزَّع منه ${describeItemUnits(item, distributedUnits)}، فالكمية مينفعش تقل عن كده. لو مسحتها التوزيع بيتحوّل لنِسب بنفس نصيب كل بند`
+        : 'الصنف متوزَّع بالنسبة. لو كتبت كمية، النِّسب بتتحوّل لوحدات بنفس نصيب كل بند'
+
+  async function save() {
+    setError('')
+    try {
+      await updateAdvanceItem(advance.id, {
+        name,
+        counterparty,
+        ...(fixedOnly ? {} : { quantity: quantityValue, unitName }),
+      })
+      onClose()
+    } catch (e) {
+      setError(errorText(e))
+    }
+  }
+
+  return (
+    <Modal open onClose={onClose} title="تعديل بيانات الصنف">
+      {error && <Banner kind="error">{error}</Banner>}
+      <Field label="اسم الصنف">
+        <input className={inputClass} value={name} maxLength={80} onChange={(e) => setName(e.target.value)} />
+      </Field>
+      <Field label="المورد / المستفيد (اختياري)">
+        <input className={inputClass} value={counterparty} onChange={(e) => setCounterparty(e.target.value)} />
+      </Field>
+      {fixedOnly ? (
+        <p className="text-xs text-slate-500 mb-3">الصنف ده متوزَّع على بنود بمبالغ ثابتة، فمالوش كمية أو وحدة.</p>
+      ) : (
+        <div className="flex gap-2">
+          <div className="flex-1">
+            <Field label="الكمية (اختياري)">
+              <input type="number" inputMode="decimal" className={inputClass} value={quantity} onChange={(e) => setQuantity(e.target.value)} />
+            </Field>
+          </div>
+          <div className="flex-1">
+            <Field label="الوحدة">
+              <input
+                className={inputClass}
+                value={unitName}
+                maxLength={20}
+                placeholder="نقلة، شيكارة، طن..."
+                disabled={quantityValue === null}
+                onChange={(e) => setUnitName(e.target.value)}
+              />
+            </Field>
+          </div>
+        </div>
+      )}
+      {quantityInvalid && <p className="text-xs text-red-600 -mt-2 mb-3">الكمية لازم تكون أكبر من صفر</p>}
+      {quantityHint && !quantityInvalid && <p className="text-xs text-slate-500 -mt-2 mb-3">{quantityHint}</p>}
+      <p className="text-xs text-slate-500 mb-3">
+        المدفوع والتوزيع مبيتغيروش من هنا. تاريخ كل دفعة وطريقة دفعها بيتعدلوا من «عرض الدفعات».
+      </p>
+      <div className="flex gap-2">
+        <Button className="flex-1" onClick={save} disabled={!name.trim() || quantityInvalid}>
+          حفظ التعديل
+        </Button>
+        <Button variant="secondary" onClick={onClose}>
+          رجوع
+        </Button>
+      </div>
+    </Modal>
   )
 }
 

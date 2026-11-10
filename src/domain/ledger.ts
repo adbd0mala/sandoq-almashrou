@@ -158,6 +158,13 @@ export async function archiveCategory(id: string): Promise<void> {
   await db.categories.update(id, { active: false })
 }
 
+/** Puts an archived بند back in use. Its entries were never touched by
+ * archiving, so there is nothing else to restore. */
+export async function unarchiveCategory(id: string): Promise<void> {
+  if (!(await db.categories.get(id))) throw new LedgerError('بند المصروف غير موجود')
+  await db.categories.update(id, { active: true })
+}
+
 export async function deleteCategoryIfUnused(id: string): Promise<void> {
   const count =
     (await db.ledger.where('categoryId').equals(id).count()) + (await db.advanceShares.where('categoryId').equals(id).count())
@@ -482,6 +489,10 @@ export async function listAllPayables(): Promise<PayableStatus[]> {
   return statuses.sort((a, b) => b.payable.createdAt.localeCompare(a.payable.createdAt))
 }
 
+/** How a payment against a payable is labelled. One place, so a corrected
+ * supplier name or description can be carried onto payments already made. */
+const settlementDescription = (supplierName: string, description: string) => `سداد مستحق مورد: ${supplierName} (${description})`
+
 export interface SettlePayableInput {
   payableId: string
   amountQirsh: number
@@ -513,7 +524,7 @@ export async function settlePayable(input: SettlePayableInput): Promise<LedgerEn
           categoryId: status.payable.categoryId,
           amountQirsh: input.amountQirsh,
           date: input.date,
-          description: `سداد مستحق مورد: ${status.payable.supplierName} (${status.payable.description})`,
+          description: settlementDescription(status.payable.supplierName, status.payable.description),
           counterparty: status.payable.supplierName,
           paymentMethod: input.paymentMethod,
           invoiceNumber: input.invoiceNumber,
@@ -1009,6 +1020,180 @@ export async function reverseEntry(entryId: string, reason: string): Promise<Led
 
     await db.ledger.update(original.id, { reversed: true })
     return reversal
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Corrections that move no money: wording, dates, names, an item's quantity,
+// a payable's invoice total. Amounts, بنود and funders are never edited in
+// place — those change only by reversing an entry and recording it again,
+// so every number in the ledger stays traceable.
+// ---------------------------------------------------------------------------
+
+function assertIsoDate(date: string): void {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(date))) throw new LedgerError('التاريخ غير صحيح')
+}
+
+/** A live row's wording may still be corrected. Reversal entries, and the
+ * entries they cancelled, are history and stay exactly as recorded. */
+const isLive = (e: LedgerEntry) => !e.reversalOfId && !e.reversed
+
+/** New text for a row that was labelled from a name ("name" or
+ * "name — note"), or null if it no longer follows that pattern. */
+function relabel(description: string, oldName: string, newName: string): string | null {
+  if (description === oldName) return newName
+  if (description.startsWith(`${oldName} — `)) return newName + description.slice(oldName.length)
+  return null
+}
+
+/** Carries an item's new name / supplier onto its follow-up payments and
+ * fixed-amount allocations, which were labelled from it when recorded.
+ * `advance` is the item's first entry as it was before the change. */
+async function relabelItemRows(advance: LedgerEntry, name: string, counterparty: string | undefined): Promise<void> {
+  const rows = [
+    ...(await db.ledger.where('advanceParentId').equals(advance.id).toArray()),
+    ...(await db.ledger.where('advanceOriginId').equals(advance.id).toArray()),
+  ]
+  for (const row of rows.filter(isLive)) {
+    await db.ledger.update(row.id, {
+      description: relabel(row.description, advance.description, name) ?? row.description,
+      counterparty,
+    })
+  }
+}
+
+/** Saves a payable's corrected fields, and carries its supplier name and
+ * description onto the settlement payments that were labelled from them.
+ * `payable` is the row as it was before the change. */
+async function relabelPayable(
+  payable: Payable,
+  next: { supplierName: string; description: string; date: string; totalQirsh: number },
+): Promise<void> {
+  const oldLabel = settlementDescription(payable.supplierName, payable.description)
+  const settlements = await db.payableSettlements.where('payableId').equals(payable.id).toArray()
+  for (const settlement of settlements) {
+    const entry = await db.ledger.get(settlement.ledgerEntryId)
+    if (!entry || !isLive(entry)) continue
+    await db.ledger.update(entry.id, {
+      counterparty: next.supplierName,
+      description: entry.description === oldLabel ? settlementDescription(next.supplierName, next.description) : entry.description,
+    })
+  }
+  await db.payables.update(payable.id, next)
+}
+
+export interface EntryDetailsPatch {
+  description?: string
+  date?: string
+  /** Ignored for contributions, whose other party is the funder. */
+  counterparty?: string
+  paymentMethod?: PaymentMethod
+  invoiceNumber?: string
+}
+
+/** Corrects the wording of a recorded entry — never its amount, بند or
+ * funder. A name other rows were labelled from (an item's, a payable
+ * supplier's) is carried onto those rows too. */
+export async function updateEntryDetails(entryId: string, patch: EntryDetailsPatch): Promise<void> {
+  await db.transaction('rw', [db.ledger, db.payables, db.payableSettlements], async () => {
+    const entry = await db.ledger.get(entryId)
+    if (!entry) throw new LedgerError('الحركة غير موجودة')
+    if (!isLive(entry)) throw new LedgerError('الحركة دي ملغاة أو حركة إلغاء، وبياناتها بتفضل زي ما اتسجلت')
+
+    const description = patch.description !== undefined ? patch.description.trim() : entry.description
+    if (!description) throw new LedgerError('الوصف مطلوب')
+    const date = patch.date ?? entry.date
+    assertIsoDate(date)
+    const counterparty =
+      patch.counterparty !== undefined && entry.type !== 'CONTRIBUTION' ? patch.counterparty.trim() || undefined : entry.counterparty
+    const paymentMethod = patch.paymentMethod ?? entry.paymentMethod
+    const invoiceNumber = patch.invoiceNumber !== undefined ? patch.invoiceNumber.trim() || undefined : entry.invoiceNumber
+
+    const unchanged =
+      description === entry.description &&
+      date === entry.date &&
+      counterparty === entry.counterparty &&
+      paymentMethod === entry.paymentMethod &&
+      invoiceNumber === entry.invoiceNumber
+    if (unchanged) return
+
+    const payable = await db.payables.where('originLedgerEntryId').equals(entryId).first()
+    if (payable) {
+      if (!counterparty) throw new LedgerError('اسم المورد مطلوب لأن الحركة دي عليها مستحق للمورد')
+      await relabelPayable(payable, { supplierName: counterparty, description, date, totalQirsh: payable.totalQirsh })
+    }
+    if (isItemOrigin(entry)) await relabelItemRows(entry, description, counterparty)
+
+    await db.ledger.update(entryId, { description, date, counterparty, paymentMethod, invoiceNumber, editedAt: new Date().toISOString() })
+  })
+}
+
+export interface UpdateAdvanceItemInput {
+  name?: string
+  counterparty?: string
+  /** A number sets or corrects the quantity bought; null removes it, and
+   * the item is then distributed by percent instead of by units. */
+  quantity?: number | null
+  unitName?: string
+}
+
+/** Corrects an item's name, supplier, quantity or unit. No money moves:
+ * what each بند carries is always derived from the item's payments. */
+export async function updateAdvanceItem(advanceId: string, patch: UpdateAdvanceItemInput): Promise<void> {
+  await db.transaction('rw', [db.ledger, db.advanceShares], async () => {
+    const status = await getAdvanceStatus(advanceId)
+    const { advance } = status
+
+    const name = patch.name !== undefined ? patch.name.trim() : advance.description
+    if (!name) throw new LedgerError('اسم الصنف مطلوب')
+    const counterparty = patch.counterparty !== undefined ? patch.counterparty.trim() || undefined : advance.counterparty
+
+    const oldQuantity = status.hasQuantity ? advance.quantity! : null
+    const quantity = patch.quantity === undefined ? oldQuantity : patch.quantity
+    if (quantity !== null && !(quantity > 0)) throw new LedgerError('الكمية يجب أن تكون أكبر من صفر')
+
+    if (quantity !== oldQuantity) {
+      if (quantity !== null && status.fixedAllocatedQirsh > 0) {
+        throw new LedgerError('الصنف ده اتوزع منه بمبلغ ثابت، فمينفعش يتحدد له كمية. الغِ التوزيعات دي الأول')
+      }
+      if (quantity !== null && oldQuantity !== null) {
+        // Units already given to بنود are real quantities: they stay as they
+        // are, so the corrected total can't be less than what was handed out.
+        const distributed = status.shares.reduce((s, c) => s + c.share.units, 0)
+        if (quantity < distributed - UNIT_EPSILON) {
+          throw new LedgerError(
+            `الكمية الجديدة أقل من اللي اتوزّع على البنود فعلاً (${formatUnits(distributed)} ${advance.unitName || 'وحدة'})`,
+          )
+        }
+      } else {
+        // Switching between "by units" and "by percent": every بند keeps its
+        // proportion of the item, re-expressed in the new basis.
+        const factor = (quantity ?? 100) / status.basisUnits
+        for (const { share } of status.shares) await db.advanceShares.update(share.id, { units: share.units * factor })
+      }
+    }
+    const unitName = quantity === null ? undefined : patch.unitName !== undefined ? patch.unitName.trim() || undefined : advance.unitName
+
+    await relabelItemRows(advance, name, counterparty)
+    await db.ledger.update(advanceId, { description: name, counterparty, quantity: quantity ?? undefined, unitName })
+  })
+}
+
+/** Corrects a payable's supplier name or invoice total. The total can't go
+ * below what has been paid; setting it equal to that closes the payable. */
+export async function updatePayable(payableId: string, patch: { supplierName?: string; totalQirsh?: number }): Promise<void> {
+  await db.transaction('rw', [db.ledger, db.payables, db.payableSettlements], async () => {
+    const { payable, paidQirsh } = await getPayableStatus(payableId)
+
+    const supplierName = patch.supplierName !== undefined ? patch.supplierName.trim() : payable.supplierName
+    if (!supplierName) throw new LedgerError('اسم المورد مطلوب')
+    const totalQirsh = patch.totalQirsh ?? payable.totalQirsh
+    if (!(totalQirsh > 0)) throw new LedgerError('إجمالي قيمة الفاتورة يجب أن يكون أكبر من صفر')
+    if (totalQirsh < paidQirsh) throw new LedgerError(`إجمالي الفاتورة أقل من المدفوع فعلاً (${formatEGP(paidQirsh)})`)
+
+    const origin = await db.ledger.get(payable.originLedgerEntryId)
+    if (origin && isLive(origin)) await db.ledger.update(origin.id, { counterparty: supplierName })
+    await relabelPayable(payable, { supplierName, description: payable.description, date: payable.date, totalQirsh })
   })
 }
 

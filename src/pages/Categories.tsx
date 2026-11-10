@@ -1,6 +1,15 @@
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useState } from 'react'
-import { LedgerError, addCategory, archiveCategory, deleteCategoryIfUnused, getSpentByCategory, listCategories, updateCategory } from '../domain/ledger'
+import {
+  LedgerError,
+  addCategory,
+  archiveCategory,
+  deleteCategoryIfUnused,
+  getSpentByCategory,
+  listCategories,
+  unarchiveCategory,
+  updateCategory,
+} from '../domain/ledger'
 import { egpToQirsh, formatEGP } from '../domain/money'
 import { Banner, Button, Card, EmptyState, Field, Modal, PageTitle, inputClass } from '../components/ui'
 import type { ExpenseCategory } from '../domain/types'
@@ -66,8 +75,13 @@ export function Categories({ onOpenStatement }: { onOpenStatement: (categoryId: 
           <h3 className="font-bold text-slate-500 mb-2 text-sm">بنود مؤرشفة</h3>
           <ul className="divide-y divide-slate-100">
             {archived.map((c) => (
-              <li key={c.id} className="py-2 text-sm text-slate-400 flex justify-between">
-                <button onClick={() => onOpenStatement(c.id)}>{c.name}</button>
+              <li key={c.id} className="py-2 text-sm text-slate-400 flex justify-between gap-2">
+                <button className="min-w-0 break-words text-right" onClick={() => onOpenStatement(c.id)}>
+                  {c.name}
+                </button>
+                <button className="text-xs text-teal-700 font-semibold shrink-0" onClick={() => unarchiveCategory(c.id)}>
+                  إلغاء الأرشفة
+                </button>
               </li>
             ))}
           </ul>
