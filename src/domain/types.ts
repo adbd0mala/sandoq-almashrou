@@ -66,6 +66,11 @@ export interface LedgerEntry {
    * units; when absent it's distributed by percent or by fixed amounts. */
   quantity?: number
   unitName?: string
+  /** Only on an item's first ADVANCE entry, and only when the full price is
+   * known (it often isn't at deposit time, and can be filled in later):
+   * what the item costs in total. Not money that moved — just what lets
+   * "still owed to the supplier" be shown as this minus what's been paid. */
+  agreedTotalQirsh?: number
 }
 
 /** One بند's share of an item (an ADVANCE and its follow-up payments),

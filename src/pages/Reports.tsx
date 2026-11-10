@@ -7,6 +7,7 @@ import {
   getCategoryStatement,
   getFunderStatement,
   getDashboardSummary,
+  listAdvanceItems,
   listCategories,
   listFunders,
   listOpenPayables,
@@ -56,7 +57,7 @@ export function Reports({ initialCategoryId, initialTab }: { initialCategoryId?:
       {tab === 'full' && <FullProjectReport />}
       {tab === 'funder' && <FunderReport />}
       {tab === 'category' && <CategoryReport initialCategoryId={initialCategoryId} />}
-      {tab === 'payables' && <PayablesReport />}
+      {tab === 'payables' && <PayablesReport onOpenItems={() => setTab('items')} />}
       {tab === 'items' && <ItemsReport />}
     </div>
   )
@@ -439,21 +440,27 @@ function CategoryReport({ initialCategoryId }: { initialCategoryId?: string }) {
   )
 }
 
-function PayablesReport() {
+function PayablesReport({ onOpenItems }: { onOpenItems: () => void }) {
   const payables = useLiveQuery(listOpenPayables, [])
+  const items = useLiveQuery(listAdvanceItems, [])
   const [settling, setSettling] = useState<PayableStatus | null>(null)
 
-  if (!payables) return null
+  if (!payables || !items) return null
 
-  if (payables.length === 0) {
+  // Items whose full price is known and not fully paid are owed to a supplier too.
+  const owedItems = items.filter((i) => (i.owedQirsh ?? 0) > 0)
+
+  if (payables.length === 0 && owedItems.length === 0) {
     return (
       <Card>
-        <EmptyState>مفيش مستحقات مفتوحة لموردين دلوقتي. لما تسجّل مصروف بدفعة جزئية هيظهر هنا</EmptyState>
+        <EmptyState>
+          مفيش مستحقات مفتوحة لموردين دلوقتي. هيظهر هنا أي مصروف بدفعة جزئية، وأي صنف مسجّل له إجمالي حساب ولسه عليه باقي
+        </EmptyState>
       </Card>
     )
   }
 
-  const totalRemaining = payables.reduce((s, p) => s + p.remainingQirsh, 0)
+  const totalRemaining = payables.reduce((s, p) => s + p.remainingQirsh, 0) + owedItems.reduce((s, i) => s + (i.owedQirsh ?? 0), 0)
 
   return (
     <div className="space-y-3">
@@ -476,6 +483,26 @@ function PayablesReport() {
           </div>
           <Button variant="secondary" className="w-full mt-3" onClick={() => setSettling(p)}>
             سداد جزء أو كل الباقي
+          </Button>
+        </Card>
+      ))}
+
+      {owedItems.map((i) => (
+        <Card key={i.advance.id}>
+          <div className="flex justify-between items-start gap-2">
+            <div className="min-w-0">
+              <div className="font-semibold text-slate-800 break-words">{i.advance.counterparty || i.advance.description}</div>
+              <div className="text-xs text-slate-400">
+                صنف: {i.advance.description} · {i.advance.date}
+              </div>
+            </div>
+            <span className="text-amber-700 font-bold tabular-nums shrink-0">{formatEGP(i.owedQirsh ?? 0)}</span>
+          </div>
+          <div className="text-xs text-slate-500 mt-2">
+            إجمالي الحساب: {formatEGP(i.agreedTotalQirsh ?? 0)} · المدفوع: {formatEGP(i.totalPaidQirsh)}
+          </div>
+          <Button variant="secondary" className="w-full mt-3" onClick={onOpenItems}>
+            سداد من «الأصناف والدفعات»
           </Button>
         </Card>
       ))}

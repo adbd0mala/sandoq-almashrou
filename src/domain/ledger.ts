@@ -661,11 +661,16 @@ export interface RecordAdvanceInput {
   /** How many units were bought. Set it to distribute the item by units later. */
   quantity?: number
   unitName?: string
+  /** The item's full price, when known. amountQirsh is then a deposit against it. */
+  agreedTotalQirsh?: number
 }
 
 export async function recordAdvance(input: RecordAdvanceInput): Promise<LedgerEntry> {
   if (input.amountQirsh <= 0) throw new LedgerError('قيمة الدفعة يجب أن تكون أكبر من صفر')
   if (input.quantity !== undefined && !(input.quantity > 0)) throw new LedgerError('الكمية يجب أن تكون أكبر من صفر')
+  if (input.agreedTotalQirsh !== undefined && input.agreedTotalQirsh < input.amountQirsh) {
+    throw new LedgerError('المدفوع الآن أكبر من إجمالي الحساب')
+  }
 
   return db.transaction('rw', [db.ledger, db.funders, db.allocations, db.settings], async () => {
     const activeFunders = await checkCanSpend(input.amountQirsh)
@@ -680,6 +685,7 @@ export async function recordAdvance(input: RecordAdvanceInput): Promise<LedgerEn
       invoiceNumber: input.invoiceNumber?.trim() || undefined,
       quantity: input.quantity,
       unitName: input.quantity !== undefined ? input.unitName?.trim() || undefined : undefined,
+      agreedTotalQirsh: input.agreedTotalQirsh,
       createdAt: new Date().toISOString(),
     }
     await db.ledger.add(entry)
@@ -704,7 +710,12 @@ export async function recordAdvancePayment(input: RecordAdvancePaymentInput): Pr
   if (input.amountQirsh <= 0) throw new LedgerError('قيمة الدفعة يجب أن تكون أكبر من صفر')
 
   return db.transaction('rw', [db.ledger, db.funders, db.allocations, db.settings, db.advanceShares], async () => {
-    const { advance } = await getAdvanceStatus(input.advanceId)
+    const { advance, owedQirsh } = await getAdvanceStatus(input.advanceId)
+    if (owedQirsh !== null && input.amountQirsh > owedQirsh) {
+      throw new LedgerError(
+        `الدفعة أكبر من الباقي من حساب الصنف (${formatEGP(Math.max(0, owedQirsh))}). لو الحساب اتغيّر عدّل إجمالي الحساب الأول`,
+      )
+    }
     const activeFunders = await checkCanSpend(input.amountQirsh)
     const entry: LedgerEntry = {
       id: newId(),
@@ -746,6 +757,10 @@ export interface AdvanceStatus {
   remainingUnits: number
   /** Money not yet attributed to any بند. */
   remainingQirsh: number
+  /** The item's full price if it has been set, else null (not known yet). */
+  agreedTotalQirsh: number | null
+  /** Still to pay the supplier: full price − paid so far. null while the full price isn't known. */
+  owedQirsh: number | null
 }
 
 const UNIT_EPSILON = 1e-6
@@ -790,6 +805,7 @@ export async function getAdvanceStatus(advanceId: string): Promise<AdvanceStatus
       .map((r) => ({ share: r, amountQirsh: amountById.get(r.id) ?? 0 }))
   }
   const sharedQirsh = shares.reduce((s, c) => s + c.amountQirsh, 0)
+  const agreedTotalQirsh = advance.agreedTotalQirsh !== undefined && advance.agreedTotalQirsh > 0 ? advance.agreedTotalQirsh : null
 
   return {
     advance,
@@ -802,7 +818,21 @@ export async function getAdvanceStatus(advanceId: string): Promise<AdvanceStatus
     hasQuantity,
     remainingUnits,
     remainingQirsh: totalPaidQirsh - fixedAllocatedQirsh - sharedQirsh,
+    agreedTotalQirsh,
+    owedQirsh: agreedTotalQirsh === null ? null : agreedTotalQirsh - totalPaidQirsh,
   }
+}
+
+/** Sets, changes or clears (null) an item's full price — it is often only
+ * known after the deposit. Can't be set below what has already been paid. */
+export async function setAdvanceAgreedTotal(advanceId: string, totalQirsh: number | null): Promise<void> {
+  await db.transaction('rw', [db.ledger, db.advanceShares], async () => {
+    const status = await getAdvanceStatus(advanceId)
+    if (totalQirsh !== null && totalQirsh < status.totalPaidQirsh) {
+      throw new LedgerError(`إجمالي الحساب أقل من المدفوع للصنف فعلاً (${formatEGP(status.totalPaidQirsh)})`)
+    }
+    await db.ledger.update(advanceId, { agreedTotalQirsh: totalQirsh ?? undefined })
+  })
 }
 
 /** How a number of an item's share units reads to the user: "٢ نقلة (٥٠%)"
@@ -1085,7 +1115,8 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
     listAdvanceItems(),
     getSpentByCategory(),
   ])
-  const totalPayablesQirsh = openPayables.reduce((s, p) => s + p.remainingQirsh, 0)
+  const totalPayablesQirsh =
+    openPayables.reduce((s, p) => s + p.remainingQirsh, 0) + items.reduce((s, i) => s + Math.max(0, i.owedQirsh ?? 0), 0)
   const totalUnallocatedAdvancesQirsh = items.reduce((s, i) => s + Math.max(0, i.remainingQirsh), 0)
 
   // Bucket by the entry's own type (not by the sign of signedAmount): a

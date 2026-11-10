@@ -10,6 +10,7 @@ import {
   recordAdvancePayment,
   removeAdvanceShare,
   reverseEntry,
+  setAdvanceAgreedTotal,
   type AdvanceStatus,
 } from '../domain/ledger'
 import { egpToQirsh, formatEGP, formatUnits } from '../domain/money'
@@ -40,8 +41,11 @@ export function ItemsReport() {
     )
   }
 
-  const open = items.filter((i) => i.remainingQirsh > 0)
-  const done = items.filter((i) => i.remainingQirsh <= 0)
+  const needsAttention = (i: AdvanceStatus) => i.remainingQirsh > 0 || (i.owedQirsh ?? 0) > 0
+  const open = items.filter(needsAttention)
+  const done = items.filter((i) => !needsAttention(i))
+  const totalUndistributed = open.reduce((s, i) => s + Math.max(0, i.remainingQirsh), 0)
+  const totalOwed = open.reduce((s, i) => s + Math.max(0, i.owedQirsh ?? 0), 0)
   const activeCategories = categories.filter((c) => c.active)
   const categoryName = (id: string) => categories.find((c) => c.id === id)?.name ?? 'بند محذوف'
   const distributing = items.find((i) => i.advance.id === distributingId)
@@ -60,10 +64,20 @@ export function ItemsReport() {
 
   return (
     <div className="space-y-3">
-      {open.length > 0 && (
-        <Card className="bg-amber-50 border-amber-200">
-          <div className="text-sm text-amber-700">إجمالي المدفوع ولسه مش موزَّع على بنود</div>
-          <div className="text-xl font-bold text-amber-800">{formatEGP(open.reduce((s, i) => s + i.remainingQirsh, 0))}</div>
+      {(totalUndistributed > 0 || totalOwed > 0) && (
+        <Card className="bg-amber-50 border-amber-200 space-y-2">
+          {totalUndistributed > 0 && (
+            <div>
+              <div className="text-sm text-amber-700">إجمالي المدفوع ولسه مش موزَّع على بنود</div>
+              <div className="text-xl font-bold text-amber-800">{formatEGP(totalUndistributed)}</div>
+            </div>
+          )}
+          {totalOwed > 0 && (
+            <div>
+              <div className="text-sm text-amber-700">باقي حساب أصناف للموردين</div>
+              <div className="text-xl font-bold text-amber-800">{formatEGP(totalOwed)}</div>
+            </div>
+          )}
         </Card>
       )}
 
@@ -126,6 +140,23 @@ function ItemCard({
         <span className="text-slate-500">المدفوع لحد دلوقتي</span>
         <span className="font-semibold text-slate-800 tabular-nums">{formatEGP(item.totalPaidQirsh)}</span>
       </div>
+      {item.agreedTotalQirsh !== null && item.owedQirsh !== null && (
+        <>
+          <div className="flex justify-between text-sm mt-1">
+            <span className="text-slate-500">إجمالي الحساب</span>
+            <span className="font-semibold text-slate-800 tabular-nums">{formatEGP(item.agreedTotalQirsh)}</span>
+          </div>
+          <div className="flex justify-between text-sm mt-1">
+            <span className="text-slate-500">باقي للمورد</span>
+            {item.owedQirsh > 0 ? (
+              <span className="font-bold text-amber-700 tabular-nums">{formatEGP(item.owedQirsh)}</span>
+            ) : (
+              <span className="font-semibold text-emerald-600">خالص</span>
+            )}
+          </div>
+        </>
+      )}
+      <AgreedTotalControl item={item} />
       <div className="flex justify-between text-sm mt-1">
         <span className="text-slate-500">غير موزَّع على بنود</span>
         {canDistribute ? (
@@ -206,6 +237,67 @@ function ItemCard({
       </div>
       {canDistribute && !hasCategories && <div className="text-xs text-red-500 mt-2">أضف بند مصروفات أولاً عشان تقدر توزّع الصنف ده</div>}
     </Card>
+  )
+}
+
+/** Sets the item's full price once it's known, changes it, or clears it. */
+function AgreedTotalControl({ item }: { item: AdvanceStatus }) {
+  const [open, setOpen] = useState(false)
+  const [value, setValue] = useState('')
+  const [error, setError] = useState('')
+  const known = item.agreedTotalQirsh !== null
+
+  if (!open) {
+    return (
+      <button
+        className="text-teal-700 text-xs font-semibold mt-1"
+        onClick={() => {
+          setValue(known ? String(item.agreedTotalQirsh! / 100) : '')
+          setError('')
+          setOpen(true)
+        }}
+      >
+        {known ? 'تعديل إجمالي الحساب' : 'تحديد إجمالي الحساب (لو بقى معروف)'}
+      </button>
+    )
+  }
+
+  const totalQirsh = Number(value) > 0 ? egpToQirsh(Number(value)) : 0
+
+  async function save(qirsh: number | null) {
+    try {
+      await setAdvanceAgreedTotal(item.advance.id, qirsh)
+      setOpen(false)
+    } catch (e) {
+      setError(errorText(e))
+    }
+  }
+
+  return (
+    <div className="mt-2 bg-slate-50 rounded-lg p-2 space-y-2">
+      {error && <div className="text-red-600 text-xs">{error}</div>}
+      <input
+        type="number"
+        inputMode="decimal"
+        className={inputClass}
+        placeholder="إجمالي حساب الصنف (ج.م)"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+      />
+      <div className="flex gap-2">
+        <Button onClick={() => save(totalQirsh)} disabled={totalQirsh <= 0}>
+          حفظ
+        </Button>
+        {known && (
+          <Button variant="secondary" onClick={() => save(null)}>
+            مش معروف
+          </Button>
+        )}
+        <Button variant="secondary" onClick={() => setOpen(false)}>
+          رجوع
+        </Button>
+      </div>
+    </div>
   )
 }
 
@@ -431,6 +523,8 @@ function AddPaymentModal({ item, onClose }: { item: AdvanceStatus; onClose: () =
 
   const amountQirsh = Number(amount) > 0 ? egpToQirsh(Number(amount)) : 0
   const usesShares = item.hasQuantity || item.shares.length > 0
+  const owed = item.owedQirsh === null ? null : Math.max(0, item.owedQirsh)
+  const overpays = owed !== null && amountQirsh > owed
 
   async function submit() {
     setError('')
@@ -449,10 +543,25 @@ function AddPaymentModal({ item, onClose }: { item: AdvanceStatus; onClose: () =
         المدفوع للصنف لحد دلوقتي {formatEGP(item.totalPaidQirsh)}. الدفعة دي بتتخصم من الصندوق وبتتضاف على حساب الصنف
         {usesShares ? '، وبتتوزع لوحدها على البنود بنفس توزيع الصنف.' : '، وبتزوّد غير الموزَّع منه.'}
       </p>
+      {owed !== null && (
+        <div className="flex justify-between items-center text-sm mb-3">
+          <span className="text-slate-600">
+            الباقي من الحساب: <span className="font-bold text-amber-700">{formatEGP(owed)}</span>
+          </span>
+          {owed > 0 && (
+            <button className="text-teal-700 text-xs font-semibold" onClick={() => setAmount(String(owed / 100))}>
+              كل الباقي
+            </button>
+          )}
+        </div>
+      )}
       <Field label="القيمة (ج.م)">
         <input type="number" inputMode="decimal" className={inputClass} value={amount} onChange={(e) => setAmount(e.target.value)} />
       </Field>
       {amount !== '' && amountQirsh <= 0 && <p className="text-xs text-red-600 -mt-2 mb-3">القيمة لازم تكون أكبر من صفر</p>}
+      {overpays && (
+        <p className="text-xs text-red-600 -mt-2 mb-3">القيمة أكبر من الباقي من الحساب. لو الحساب اتغيّر عدّل إجمالي الحساب من كارت الصنف الأول</p>
+      )}
       <Field label="التاريخ">
         <input type="date" className={inputClass} value={date} onChange={(e) => setDate(e.target.value)} />
       </Field>
@@ -472,7 +581,7 @@ function AddPaymentModal({ item, onClose }: { item: AdvanceStatus; onClose: () =
         <input className={inputClass} value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} />
       </Field>
       <div className="flex gap-2">
-        <Button className="flex-1" onClick={submit} disabled={amountQirsh <= 0}>
+        <Button className="flex-1" onClick={submit} disabled={amountQirsh <= 0 || overpays}>
           تسجيل الدفعة
         </Button>
         <Button variant="secondary" onClick={onClose}>

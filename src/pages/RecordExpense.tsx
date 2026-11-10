@@ -85,6 +85,7 @@ function AdvanceForm({ balanceQirsh, onDone }: { balanceQirsh: number | undefine
   const [amount, setAmount] = useState('')
   const [date, setDate] = useState(todayIso())
   const [description, setDescription] = useState('')
+  const [total, setTotal] = useState('')
   const [quantity, setQuantity] = useState('')
   const [unitName, setUnitName] = useState('')
   const [counterparty, setCounterparty] = useState('')
@@ -96,6 +97,9 @@ function AdvanceForm({ balanceQirsh, onDone }: { balanceQirsh: number | undefine
   const amountQirsh = Number(amount) > 0 ? egpToQirsh(Number(amount)) : 0
   const willExceed = balanceQirsh !== undefined && amountQirsh > balanceQirsh
   const quantityInvalid = quantity !== '' && !(Number(quantity) > 0)
+  // Empty or 0 = the full price isn't known yet; it can be set on the item later.
+  const totalQirsh = Number(total) > 0 ? egpToQirsh(Number(total)) : 0
+  const totalInvalid = totalQirsh > 0 && totalQirsh < amountQirsh
 
   async function submit() {
     setError('')
@@ -110,8 +114,10 @@ function AdvanceForm({ balanceQirsh, onDone }: { balanceQirsh: number | undefine
         invoiceNumber,
         quantity: quantity !== '' ? Number(quantity) : undefined,
         unitName,
+        agreedTotalQirsh: totalQirsh > 0 ? totalQirsh : undefined,
       })
       setAmount('')
+      setTotal('')
       setDescription('')
       setQuantity('')
       setUnitName('')
@@ -141,9 +147,17 @@ function AdvanceForm({ balanceQirsh, onDone }: { balanceQirsh: number | undefine
         <Field label="اسم الصنف / الوصف">
           <input className={inputClass} value={description} maxLength={60} onChange={(e) => setDescription(e.target.value)} placeholder="مثال: رمل، أو دفعة مقدمة للمقاول" />
         </Field>
-        <Field label="المدفوع الآن (ج.م)" hint="ممكن يكون عربون بس، حتى لو إجمالي الحساب لسه مش معروف">
+        <Field label="المدفوع الآن (ج.م)" hint="ممكن يكون عربون بس">
           <input type="number" inputMode="decimal" className={inputClass} value={amount} onChange={(e) => setAmount(e.target.value)} />
         </Field>
+        <Field label="إجمالي الحساب (اختياري)" hint="لو لسه مش معروف سيبه فاضي، وتحدده بعدين من كارت الصنف">
+          <input type="number" inputMode="decimal" className={inputClass} value={total} onChange={(e) => setTotal(e.target.value)} />
+        </Field>
+        {totalQirsh > 0 && (
+          <p className={`text-sm font-semibold -mt-1 mb-3 ${totalInvalid ? 'text-red-600' : 'text-amber-600'}`}>
+            {totalInvalid ? 'المدفوع الآن أكبر من إجمالي الحساب' : `الباقي للمورد: ${formatEGP(totalQirsh - amountQirsh)}`}
+          </p>
+        )}
         <div className="grid grid-cols-2 gap-2">
           <Field label="الكمية (اختياري)">
             <input type="number" inputMode="decimal" className={inputClass} value={quantity} onChange={(e) => setQuantity(e.target.value)} placeholder="مثال: 4" />
@@ -179,7 +193,7 @@ function AdvanceForm({ balanceQirsh, onDone }: { balanceQirsh: number | undefine
         </Field>
 
         <div className="flex gap-2">
-          <Button className="flex-1" onClick={submit} disabled={amountQirsh <= 0 || quantityInvalid}>
+          <Button className="flex-1" onClick={submit} disabled={amountQirsh <= 0 || quantityInvalid || totalInvalid}>
             تسجيل الصنف
           </Button>
           <Button variant="secondary" onClick={onDone}>
