@@ -10,7 +10,14 @@ import jsPDF from 'jspdf'
  * a printed financial statement.
  */
 export async function exportNodeToPdf(node: HTMLElement, filename: string): Promise<void> {
-  const canvas = await html2canvas(node, { scale: 2, backgroundColor: '#ffffff', useCORS: true })
+  const canvas = await html2canvas(node, {
+    scale: 2,
+    backgroundColor: '#ffffff',
+    useCORS: true,
+    // On-screen action buttons (e.g. "إلغاء الحركة") have no place in a
+    // printed/shared PDF — they'd look clickable in a static document.
+    ignoreElements: (el) => el.classList.contains('no-print'),
+  })
 
   const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' })
   const pageWidth = pdf.internal.pageSize.getWidth()

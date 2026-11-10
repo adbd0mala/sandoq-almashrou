@@ -1,7 +1,7 @@
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useState } from 'react'
 import { db } from '../db/db'
-import { LedgerError, addCategory, archiveCategory, deleteCategoryIfUnused, updateCategory } from '../domain/ledger'
+import { LedgerError, addCategory, archiveCategory, deleteCategoryIfUnused, signedAmount, updateCategory } from '../domain/ledger'
 import { egpToQirsh, formatEGP } from '../domain/money'
 import { Banner, Button, Card, EmptyState, Field, Modal, PageTitle, inputClass } from '../components/ui'
 import type { ExpenseCategory } from '../domain/types'
@@ -13,8 +13,7 @@ export function Categories({ onOpenStatement }: { onOpenStatement: (categoryId: 
     const map = new Map<string, number>()
     for (const e of entries) {
       if (!e.categoryId) continue
-      const sign = e.reversalOfId ? -1 : 1
-      map.set(e.categoryId, (map.get(e.categoryId) ?? 0) + sign * e.amountQirsh)
+      map.set(e.categoryId, (map.get(e.categoryId) ?? 0) - signedAmount(e))
     }
     return map
   }, [])
@@ -111,7 +110,7 @@ function AddCategoryModal({ open, onClose, onError }: { open: boolean; onClose: 
   return (
     <Modal open={open} onClose={onClose} title="بند مصروفات جديد">
       <Field label="اسم البند">
-        <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} placeholder="مثال: الكهرباء" />
+        <input className={inputClass} value={name} maxLength={60} onChange={(e) => setName(e.target.value)} placeholder="مثال: الكهرباء" />
       </Field>
       <Field label="وصف (اختياري)">
         <input className={inputClass} value={description} onChange={(e) => setDescription(e.target.value)} />
@@ -157,7 +156,7 @@ function EditCategoryModal({ category, onClose, onError }: { category: ExpenseCa
   return (
     <Modal open onClose={onClose} title="تعديل البند">
       <Field label="اسم البند">
-        <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} />
+        <input className={inputClass} value={name} maxLength={60} onChange={(e) => setName(e.target.value)} />
       </Field>
       <Field label="وصف">
         <input className={inputClass} value={description} onChange={(e) => setDescription(e.target.value)} />
@@ -165,7 +164,7 @@ function EditCategoryModal({ category, onClose, onError }: { category: ExpenseCa
       <Field label="الميزانية التقديرية بالجنيه">
         <input type="number" className={inputClass} value={budget} onChange={(e) => setBudget(e.target.value)} />
       </Field>
-      <Button className="w-full mb-3" onClick={save}>
+      <Button className="w-full mb-3" onClick={save} disabled={!name.trim()}>
         حفظ
       </Button>
       <div className="flex gap-2 border-t pt-3">

@@ -1,15 +1,8 @@
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useState } from 'react'
 import { db } from '../db/db'
-import {
-  LedgerError,
-  addFunder,
-  archiveFunder,
-  resetToEqualShares,
-  setCustomShares,
-  updateFunderInfo,
-} from '../domain/ledger'
-import { egpToQirsh } from '../domain/money'
+import { LedgerError, addFunder, archiveFunder, setCustomShares, unarchiveFunder, updateFunderInfo } from '../domain/ledger'
+import { egpToQirsh, roundPercentsForDisplay } from '../domain/money'
 import { Banner, Button, Card, EmptyState, Field, Modal, PageTitle, inputClass } from '../components/ui'
 import type { Funder } from '../domain/types'
 
@@ -68,8 +61,11 @@ export function Funders() {
           <h3 className="font-bold text-slate-500 mb-2 text-sm">ممولون مؤرشفون</h3>
           <ul className="divide-y divide-slate-100">
             {archived.map((f) => (
-              <li key={f.id} className="py-2 text-sm text-slate-400">
+              <li key={f.id} className="py-2 text-sm text-slate-400 flex items-center justify-between">
                 {f.name}
+                <button className="text-teal-700 font-semibold text-xs" onClick={() => unarchiveFunder(f.id).catch((e) => setError(e instanceof LedgerError ? e.message : 'حدث خطأ غير متوقع'))}>
+                  إلغاء الأرشفة
+                </button>
               </li>
             ))}
           </ul>
@@ -117,7 +113,7 @@ function AddFunderModal({ open, onClose, onError }: { open: boolean; onClose: ()
   return (
     <Modal open={open} onClose={onClose} title="إضافة ممول جديد">
       <Field label="اسم الممول">
-        <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} />
+        <input className={inputClass} value={name} maxLength={60} onChange={(e) => setName(e.target.value)} />
       </Field>
       <Field label="رقم الهاتف (اختياري)">
         <input className={inputClass} value={phone} onChange={(e) => setPhone(e.target.value)} />
@@ -169,13 +165,13 @@ function EditFunderModal({
   return (
     <Modal open onClose={onClose} title="تعديل الممول">
       <Field label="اسم الممول">
-        <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} />
+        <input className={inputClass} value={name} maxLength={60} onChange={(e) => setName(e.target.value)} />
       </Field>
       <Field label="رقم الهاتف">
         <input className={inputClass} value={phone} onChange={(e) => setPhone(e.target.value)} />
       </Field>
       <div className="flex gap-2 mb-4">
-        <Button className="flex-1" onClick={save}>
+        <Button className="flex-1" onClick={save} disabled={!name.trim()}>
           حفظ
         </Button>
       </div>
@@ -205,8 +201,13 @@ function EditFunderModal({
 }
 
 function EditSharesModal({ funders, onClose, onError }: { funders: Funder[]; onClose: () => void; onError: (m: string) => void }) {
+  // Rounded so the displayed values always sum to exactly 100.00 — otherwise
+  // three equal 33.333...% shares would each round to "33.33" independently
+  // and sum to 99.99, making "حفظ النسب" wrongly refuse the very values it
+  // just loaded.
+  const initialValues = roundPercentsForDisplay(funders.map((f) => ({ key: f.id, percent: f.sharePercent })))
   const [values, setValues] = useState<Record<string, string>>(
-    Object.fromEntries(funders.map((f) => [f.id, f.sharePercent.toFixed(2)])),
+    Object.fromEntries(funders.map((f) => [f.id, initialValues.get(f.id) ?? '0.00'])),
   )
   const sum = Object.values(values).reduce((s, v) => s + (Number(v) || 0), 0)
 
@@ -219,9 +220,12 @@ function EditSharesModal({ funders, onClose, onError }: { funders: Funder[]; onC
     }
   }
 
-  async function saveEqual() {
-    await resetToEqualShares()
-    onClose()
+  // Only fills the form with an equal split for review — does NOT save by
+  // itself. The user still has to press "حفظ النسب" to commit it, so a
+  // misclick here can't silently overwrite a deliberate custom split.
+  function fillEqual() {
+    const equalValues = roundPercentsForDisplay(funders.map((f) => ({ key: f.id, percent: 1 })))
+    setValues(Object.fromEntries(funders.map((f) => [f.id, equalValues.get(f.id) ?? '0.00'])))
   }
 
   return (
@@ -248,8 +252,8 @@ function EditSharesModal({ funders, onClose, onError }: { funders: Funder[]; onC
         <Button className="flex-1" onClick={saveCustom} disabled={Math.abs(sum - 100) > 0.01}>
           حفظ النسب
         </Button>
-        <Button variant="secondary" className="flex-1" onClick={saveEqual}>
-          إعادة توزيع بالتساوي
+        <Button variant="secondary" className="flex-1" onClick={fillEqual}>
+          تعبئة بالتساوي
         </Button>
       </div>
     </Modal>

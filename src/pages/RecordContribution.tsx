@@ -65,6 +65,9 @@ export function RecordContribution({ onDone }: { onDone: () => void }) {
         <Field label="القيمة (ج.م)">
           <input type="number" inputMode="decimal" className={inputClass} value={amount} onChange={(e) => setAmount(e.target.value)} />
         </Field>
+        {amount !== '' && amountQirsh <= 0 && (
+          <p className="text-xs text-red-600 -mt-2 mb-3">القيمة لازم تكون أكبر من صفر</p>
+        )}
         <Field label="التاريخ">
           <input type="date" className={inputClass} value={date} onChange={(e) => setDate(e.target.value)} />
         </Field>

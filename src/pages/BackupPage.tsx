@@ -106,7 +106,10 @@ export function BackupPage() {
                   <button className="text-teal-700 text-xs font-semibold" onClick={() => restoreSnapshot(s.id)}>
                     استعادة
                   </button>
-                  <button className="text-red-500 text-xs font-semibold" onClick={() => deleteSnapshot(s.id)}>
+                  <button
+                    className="text-red-500 text-xs font-semibold"
+                    onClick={() => confirm('هتحذف النسخة دي نهائيًا. متأكد؟') && deleteSnapshot(s.id)}
+                  >
                     حذف
                   </button>
                 </div>

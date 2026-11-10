@@ -23,9 +23,17 @@ export default function App() {
   const [reportCategoryId, setReportCategoryId] = useState<string | undefined>(undefined)
 
   useEffect(() => {
-    runDailyAutoBackupIfDue().catch(() => {
-      // non-fatal: the manual backup button on the backup page still works
-    })
+    const tryBackup = () =>
+      runDailyAutoBackupIfDue().catch(() => {
+        // non-fatal: the manual backup button on the backup page still works
+      })
+    tryBackup()
+    // Re-check periodically too, not just on mount — a session left open for
+    // many hours should still pick up a fresh snapshot of its current data
+    // once the 24h window elapses, instead of only ever snapshotting
+    // whatever state existed the moment the app happened to be opened.
+    const interval = setInterval(tryBackup, 30 * 60 * 1000)
+    return () => clearInterval(interval)
   }, [])
 
   function openCategoryStatement(categoryId: string) {
@@ -49,9 +57,12 @@ export default function App() {
         {NAV.map((n) => (
           <button
             key={n.tab}
-            onClick={() => setTab(n.tab)}
+            onClick={() => {
+              if (n.tab === 'reports') setReportCategoryId(undefined)
+              setTab(n.tab)
+            }}
             className={`flex-1 py-2.5 flex flex-col items-center gap-0.5 text-xs ${
-              tab === n.tab || (n.tab === 'backup' && tab === 'backup') ? 'text-teal-700 font-bold' : 'text-slate-400'
+              tab === n.tab ? 'text-teal-700 font-bold' : 'text-slate-400'
             }`}
           >
             <span className="text-lg">{n.icon}</span>

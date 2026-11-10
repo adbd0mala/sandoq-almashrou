@@ -207,7 +207,7 @@ function SingleExpenseForm({
         })
         setSuccess(
           payable
-            ? `تم التسجيل. باقي على ${counterparty.trim()}: ${(payable.totalQirsh - amountQirsh > 0 ? ((totalQirsh - amountQirsh) / 100).toFixed(2) : '0.00')} ج.م — موجود في تبويب "المستحقات" بالتقارير`
+            ? `تم التسجيل. باقي على ${counterparty.trim()}: ${formatEGP(totalQirsh - amountQirsh)} — موجود في تبويب "المستحقات" بالتقارير`
             : 'تم تسجيل المصروف بالكامل (مفيش باقي للمورد)',
         )
         setTotalInvoice('')
@@ -259,7 +259,7 @@ function SingleExpenseForm({
 
         {isPartial && totalQirsh > 0 && (
           <div className={`text-sm mb-3 font-semibold ${remainingQirsh < 0 ? 'text-red-600' : 'text-amber-600'}`}>
-            {remainingQirsh < 0 ? 'المدفوع أكبر من إجمالي الفاتورة' : `الباقي للمورد: ${(remainingQirsh / 100).toFixed(2)} ج.م`}
+            {remainingQirsh < 0 ? 'المدفوع أكبر من إجمالي الفاتورة' : `الباقي للمورد: ${formatEGP(remainingQirsh)}`}
           </div>
         )}
 
@@ -487,7 +487,7 @@ function SplitExpenseForm({
             </Field>
             {totalQirsh > 0 && (
               <div className={`text-sm mb-1 font-semibold ${remainingQirsh < 0 ? 'text-red-600' : 'text-amber-600'}`}>
-                {remainingQirsh < 0 ? 'المدفوع أكبر من إجمالي البنود' : `الباقي للمورد: ${(remainingQirsh / 100).toFixed(2)} ج.م (بيتوزع على البنود بنفس نسبتها)`}
+                {remainingQirsh < 0 ? 'المدفوع أكبر من إجمالي البنود' : `الباقي للمورد: ${formatEGP(remainingQirsh)} (بيتوزع على البنود بنفس نسبتها)`}
               </div>
             )}
           </>

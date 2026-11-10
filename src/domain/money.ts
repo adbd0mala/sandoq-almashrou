@@ -53,6 +53,18 @@ export function splitProportionally(
   return weights.map((w) => ({ key: w.key, amountQirsh: byKey.get(w.key) ?? 0 }))
 }
 
-export function round2(n: number): number {
-  return Math.round(n * 100) / 100
+/**
+ * Rounds a set of percentages to 2 decimals for display/editing in a form —
+ * guaranteeing the rounded values sum to EXACTLY 100.00, via the same
+ * largest-remainder method as splitProportionally (scaled to centipercent).
+ * Without this, three equal 33.333...% shares would each independently
+ * round to "33.33", summing to 99.99 and failing a "must equal 100%"
+ * check the moment the form reopens — even though nothing changed.
+ */
+export function roundPercentsForDisplay(shares: { key: string; percent: number }[]): Map<string, string> {
+  const centipercent = splitProportionally(
+    10000,
+    shares.map((s) => ({ key: s.key, percent: s.percent })),
+  )
+  return new Map(centipercent.map((c) => [c.key, (c.amountQirsh / 100).toFixed(2)]))
 }

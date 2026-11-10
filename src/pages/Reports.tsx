@@ -110,13 +110,13 @@ function EntryRow({ entry, onReversed }: { entry: LedgerEntry; onReversed: () =>
           {entry.reversalOfId && ' · حركة إلغاء'}
         </span>
         {canReverse && (
-          <button className="text-red-500" onClick={() => setConfirming(true)}>
+          <button className="text-red-500 no-print" onClick={() => setConfirming(true)}>
             إلغاء الحركة
           </button>
         )}
       </div>
       {confirming && (
-        <div className="mt-2 bg-red-50 rounded-lg p-2 space-y-2">
+        <div className="mt-2 bg-red-50 rounded-lg p-2 space-y-2 no-print">
           {error && <div className="text-red-600 text-xs">{error}</div>}
           <input
             className={inputClass}
@@ -200,7 +200,7 @@ function FullProjectReport() {
               const share = allocations.filter((a) => a.funderId === f.id).reduce((s, a) => s + a.amountQirsh, 0)
               return (
                 <tr key={f.id} className="border-t border-slate-100">
-                  <td className="p-1.5">{f.name}</td>
+                  <td className="p-1.5 break-words max-w-[120px]">{f.name}</td>
                   <td className="p-1.5">{f.sharePercent.toFixed(2)}%</td>
                   <td className="p-1.5">{formatEGP(contributed)}</td>
                   <td className="p-1.5">{formatEGP(share)}</td>
@@ -233,7 +233,7 @@ function FullProjectReport() {
                         ? 'دفعة غير موزعة'
                         : 'مصروف'}
                 </td>
-                <td className="p-1.5">{e.description}</td>
+                <td className="p-1.5 break-words max-w-[160px]">{e.description}</td>
                 <td className="p-1.5">{formatEGP(e.amountQirsh)}</td>
               </tr>
             ))}
@@ -483,6 +483,10 @@ function SettlePayableModal({ status, onClose }: { status: PayableStatus; onClos
         <Field label="قيمة السداد (ج.م)">
           <input type="number" inputMode="decimal" className={inputClass} value={amount} onChange={(e) => setAmount(e.target.value)} />
         </Field>
+        {amount !== '' && amountQirsh <= 0 && <p className="text-xs text-red-600 -mt-2 mb-3">القيمة لازم تكون أكبر من صفر</p>}
+        {amountQirsh > status.remainingQirsh && (
+          <p className="text-xs text-red-600 -mt-2 mb-3">القيمة أكبر من المتبقي ({formatEGP(status.remainingQirsh)})</p>
+        )}
         <Field label="التاريخ">
           <input type="date" className={inputClass} value={date} onChange={(e) => setDate(e.target.value)} />
         </Field>

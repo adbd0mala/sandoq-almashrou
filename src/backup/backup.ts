@@ -140,12 +140,31 @@ export async function createSnapshotNow(kind: 'AUTO' | 'MANUAL'): Promise<void> 
   }
 }
 
+const AUTO_BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Takes a fresh AUTO snapshot once at least 24h have passed since the last
+ * one — a rolling window, not "once per calendar day". The old calendar-day
+ * check took exactly one snapshot at the app's first open of the day and
+ * then never again, so it kept capturing whatever (often near-empty) state
+ * existed at that moment even after hours of real work. Call this on every
+ * app open AND periodically while the app stays open (see App.tsx) so a
+ * long-running session still gets a snapshot of its current data roughly
+ * once a day. Wrapped in one transaction so two near-simultaneous calls
+ * (e.g. two tabs) can't both pass the check and double-snapshot.
+ */
 export async function runDailyAutoBackupIfDue(): Promise<void> {
-  const settings = await ensureSettings()
-  const today = new Date().toISOString().slice(0, 10)
-  if (settings.lastAutoBackupAt === today) return
-  await createSnapshotNow('AUTO')
-  await db.settings.update('singleton', { lastAutoBackupAt: today })
+  await db.transaction(
+    'rw',
+    [db.settings, db.backups, db.funders, db.categories, db.ledger, db.allocations, db.payables, db.payableSettlements],
+    async () => {
+      const settings = await ensureSettings()
+      const lastMs = settings.lastAutoBackupAt ? new Date(settings.lastAutoBackupAt).getTime() : 0
+      if (Date.now() - lastMs < AUTO_BACKUP_INTERVAL_MS) return
+      await createSnapshotNow('AUTO')
+      await db.settings.update('singleton', { lastAutoBackupAt: new Date().toISOString() })
+    },
+  )
 }
 
 export async function listSnapshots() {

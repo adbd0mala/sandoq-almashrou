@@ -1,6 +1,6 @@
 import { db, ensureSettings, newId } from '../db/db'
 import type { ExpenseCategory, Funder, LedgerEntry, Payable, PaymentMethod } from './types'
-import { splitProportionally } from './money'
+import { formatEGP, splitProportionally } from './money'
 
 export class LedgerError extends Error {}
 
@@ -62,14 +62,6 @@ export async function addFunder(input: {
   return funder
 }
 
-export async function resetToEqualShares(): Promise<void> {
-  await db.transaction('rw', db.funders, async () => {
-    const active = await listActiveFunders()
-    const shares = equalShares(active.map((f) => f.id))
-    await Promise.all(active.map((f) => db.funders.update(f.id, { sharePercent: shares.get(f.id) ?? 0 })))
-  })
-}
-
 /** Set custom shares. Must cover exactly the active funders and sum to 100.00 (+-0.01) */
 export async function setCustomShares(entries: { funderId: string; percent: number }[]): Promise<void> {
   const active = await listActiveFunders()
@@ -100,10 +92,24 @@ export async function archiveFunder(funderId: string): Promise<void> {
   })
 }
 
+/** Reactivates an archived funder and folds them back into the equal split
+ * with the other active funders (same re-equalization archiveFunder does).
+ * Their historical ledger entries were never touched by archiving, so
+ * nothing needs restoring there. */
+export async function unarchiveFunder(funderId: string): Promise<void> {
+  await db.transaction('rw', db.funders, async () => {
+    await db.funders.update(funderId, { active: true })
+    const active = await listActiveFunders()
+    const shares = equalShares(active.map((f) => f.id))
+    await Promise.all(active.map((f) => db.funders.update(f.id, { sharePercent: shares.get(f.id) ?? 0 })))
+  })
+}
+
 export async function updateFunderInfo(
   funderId: string,
   patch: { name?: string; phone?: string; notes?: string; targetContributionQirsh?: number },
 ): Promise<void> {
+  if (patch.name !== undefined && !patch.name.trim()) throw new LedgerError('اسم الممول مطلوب')
   await db.funders.update(funderId, patch)
 }
 
@@ -137,6 +143,13 @@ export async function updateCategory(
   id: string,
   patch: { name?: string; description?: string; budgetQirsh?: number },
 ): Promise<void> {
+  if (patch.name !== undefined) {
+    if (!patch.name.trim()) throw new LedgerError('اسم البند مطلوب')
+    const existing = await db.categories.toArray()
+    if (existing.some((c) => c.id !== id && c.name.trim() === patch.name!.trim())) {
+      throw new LedgerError('يوجد بند بنفس الاسم')
+    }
+  }
   await db.categories.update(id, patch)
 }
 
@@ -233,13 +246,25 @@ async function recordFunderAllocations(ledgerEntryId: string, amountQirsh: numbe
   }
 }
 
+/** Checks a category exists, optionally rejecting an archived one. Archived
+ * categories must still accept settlePayable (paying off a debt recognized
+ * before archiving), just not brand-new spending. */
+async function assertCategory(categoryId: string, requireActive: boolean): Promise<void> {
+  const category = await db.categories.get(categoryId)
+  if (!category) throw new LedgerError('بند المصروف غير موجود')
+  if (requireActive && !category.active) throw new LedgerError('بند المصروف مؤرشف. فعّله أولاً من شاشة البنود')
+}
+
 /** Inserts one EXPENSE ledger entry + its per-funder allocation. Assumes it
  * already runs inside an open Dexie transaction covering ledger/allocations
  * — callers (recordExpense, recordSplitExpense) own the transaction and the
  * balance/shares checks, so a multi-line split stays atomic as one unit. */
-async function insertExpenseEntry(input: RecordExpenseInput, activeFunders: Funder[]): Promise<LedgerEntry> {
-  const category = await db.categories.get(input.categoryId)
-  if (!category || !category.active) throw new LedgerError('بند المصروف غير موجود أو مؤرشف')
+async function insertExpenseEntry(
+  input: RecordExpenseInput,
+  activeFunders: Funder[],
+  opts: { requireActiveCategory?: boolean } = {},
+): Promise<LedgerEntry> {
+  await assertCategory(input.categoryId, opts.requireActiveCategory ?? true)
 
   const entry: LedgerEntry = {
     id: newId(),
@@ -266,7 +291,7 @@ async function checkCanSpend(totalQirsh: number): Promise<Funder[]> {
   const balance = await getVaultBalanceQirsh()
   if (!settings.allowOverdraft && totalQirsh > balance) {
     throw new LedgerError(
-      `الرصيد غير كافٍ. الرصيد الحالي ${(balance / 100).toFixed(2)} ج.م وقيمة المصروف ${(totalQirsh / 100).toFixed(2)} ج.م`,
+      `الرصيد غير كافٍ. الرصيد الحالي ${formatEGP(balance)} وقيمة المصروف ${formatEGP(totalQirsh)}`,
     )
   }
 
@@ -376,6 +401,7 @@ export async function recordExpenseWithPayable(input: RecordExpenseWithPayableIn
       // payable has an originLedgerEntryId to anchor to and the purchase
       // shows up in the category's history from day one.
       await checkCanSpend(0)
+      await assertCategory(input.categoryId, true)
       entry = {
         id: newId(),
         type: 'EXPENSE',
@@ -415,17 +441,30 @@ export interface PayableStatus {
   settlementEntries: LedgerEntry[]
 }
 
+/** Sums an entry's cash effect together with any reversal of it, so a
+ * reversed payment nets to exactly 0 instead of still counting as paid. */
+async function paidEffect(entryId: string): Promise<number> {
+  const entry = await db.ledger.get(entryId)
+  if (!entry) return 0
+  const reversal = await db.ledger.where('reversalOfId').equals(entryId).first()
+  return -signedAmount(entry) + (reversal ? -signedAmount(reversal) : 0)
+}
+
 export async function getPayableStatus(payableId: string): Promise<PayableStatus> {
   const payable = await db.payables.get(payableId)
   if (!payable) throw new LedgerError('المستحق غير موجود')
 
-  const origin = await db.ledger.get(payable.originLedgerEntryId)
   const settlements = await db.payableSettlements.where('payableId').equals(payableId).toArray()
   const settlementEntries = (
     await Promise.all(settlements.map((s) => db.ledger.get(s.ledgerEntryId)))
   ).filter((e): e is LedgerEntry => !!e)
 
-  const paidQirsh = [origin, ...settlementEntries].reduce((sum, e) => (e ? sum - signedAmount(e) : sum), 0)
+  // paidQirsh must reflect reversals: if the origin payment or any
+  // settlement was later cancelled, it must stop counting as paid.
+  const ids = [payable.originLedgerEntryId, ...settlementEntries.map((e) => e.id)]
+  const effects = await Promise.all(ids.map(paidEffect))
+  const paidQirsh = effects.reduce((s, v) => s + v, 0)
+
   return { payable, paidQirsh, remainingQirsh: payable.totalQirsh - paidQirsh, settlementEntries }
 }
 
@@ -462,7 +501,7 @@ export async function settlePayable(input: SettlePayableInput): Promise<LedgerEn
       const status = await getPayableStatus(input.payableId)
       if (input.amountQirsh > status.remainingQirsh) {
         throw new LedgerError(
-          `قيمة السداد أكبر من المتبقي. المتبقي للمورد ${status.payable.supplierName} هو ${(status.remainingQirsh / 100).toFixed(2)} ج.م`,
+          `قيمة السداد أكبر من المتبقي. المتبقي للمورد ${status.payable.supplierName} هو ${formatEGP(status.remainingQirsh)}`,
         )
       }
 
@@ -478,6 +517,7 @@ export async function settlePayable(input: SettlePayableInput): Promise<LedgerEn
           invoiceNumber: input.invoiceNumber,
         },
         activeFunders,
+        { requireActiveCategory: false },
       )
 
       await db.payableSettlements.add({ id: newId(), payableId: input.payableId, ledgerEntryId: entry.id, createdAt: new Date().toISOString() })
@@ -559,6 +599,7 @@ export async function recordSplitExpenseWithPayable(
           activeFunders,
         )
       } else {
+        await assertCategory(line.categoryId, true)
         entry = {
           id: newId(),
           type: 'EXPENSE',
@@ -678,7 +719,7 @@ export async function allocateAdvance(input: AllocateAdvanceInput): Promise<Ledg
     const totalToAllocate = input.lines.reduce((s, l) => s + l.amountQirsh, 0)
     if (totalToAllocate > status.remainingQirsh) {
       throw new LedgerError(
-        `إجمالي المطلوب توزيعه أكبر من المتبقي غير الموزع (${(status.remainingQirsh / 100).toFixed(2)} ج.م)`,
+        `إجمالي المطلوب توزيعه أكبر من المتبقي غير الموزع (${formatEGP(status.remainingQirsh)})`,
       )
     }
 
