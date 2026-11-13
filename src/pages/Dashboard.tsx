@@ -40,14 +40,14 @@ export function Dashboard({
       </div>
 
       <div className="grid grid-cols-2 gap-3 text-center">
-        <Card>
+        <button onClick={() => onNavigate('funders')} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 active:bg-slate-50">
           <div className="text-2xl font-bold text-slate-800">{summary.funderCount}</div>
-          <div className="text-xs text-slate-500 mt-1">ممولون نشطون</div>
-        </Card>
-        <Card>
+          <div className="text-xs text-teal-700 font-semibold mt-1">ممولون نشطون ‹</div>
+        </button>
+        <button onClick={() => onNavigate('categories')} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 active:bg-slate-50">
           <div className="text-2xl font-bold text-slate-800">{summary.categoryCount}</div>
-          <div className="text-xs text-slate-500 mt-1">بند مصروفات نشط</div>
-        </Card>
+          <div className="text-xs text-teal-700 font-semibold mt-1">بند مصروفات نشط ‹</div>
+        </button>
       </div>
 
       {summary.totalPayablesQirsh > 0 && (

@@ -3,23 +3,29 @@ import { PAYMENT_METHOD_LABELS } from '../domain/types'
 import type { CategoryStatement, FunderStatement } from '../domain/ledger'
 import { describeItemUnits, signedAmount } from '../domain/ledger'
 import { qirshToEgp } from '../domain/money'
-import type { ExpenseAllocation, Funder, LedgerEntry } from '../domain/types'
+import type { ExpenseAllocation, ExpenseCategory, Funder, LedgerEntry } from '../domain/types'
 
 function download(wb: XLSX.WorkBook, filename: string) {
   XLSX.writeFile(wb, filename)
 }
 
-function entryRow(e: LedgerEntry) {
-  return {
+/** Rows for a list of entries. `partyOf` adds a "البند / الممول" column (the
+ * full report mixes بنود and funders; a single statement doesn't need it).
+ * The status column appears only when the list holds cancelled entries —
+ * a report exported with those hidden has nothing to say there. */
+function entryRows(entries: LedgerEntry[], partyOf?: (e: LedgerEntry) => string) {
+  const withStatus = entries.some((e) => e.reversed || e.reversalOfId)
+  return entries.map((e) => ({
     التاريخ: e.date,
     'النوع': e.type === 'CONTRIBUTION' ? 'مساهمة' : e.affectsVault === false ? 'توزيع دفعة' : e.type === 'ADVANCE' ? 'دفعة صنف' : 'مصروف',
+    ...(partyOf ? { 'البند / الممول': partyOf(e) } : {}),
     'الوصف': e.description,
     'المورد/المستفيد': e.counterparty ?? '',
     'طريقة الدفع': e.paymentMethod ? PAYMENT_METHOD_LABELS[e.paymentMethod] : '',
     'رقم الفاتورة': e.invoiceNumber ?? '',
     'القيمة (ج.م)': qirshToEgp(Math.abs(signedAmount(e))),
-    'الحالة': e.reversalOfId ? 'حركة إلغاء' : e.reversed ? 'ملغاة' : 'سارية',
-  }
+    ...(withStatus ? { 'الحالة': e.reversalOfId ? 'حركة إلغاء' : e.reversed ? 'ملغاة' : 'سارية' } : {}),
+  }))
 }
 
 export function exportCategoryStatementToExcel(stmt: CategoryStatement, filename?: string) {
@@ -36,7 +42,7 @@ export function exportCategoryStatementToExcel(stmt: CategoryStatement, filename
   ])
   XLSX.utils.book_append_sheet(wb, summarySheet, 'ملخص البند')
 
-  const rows = stmt.entries.map(entryRow)
+  const rows = entryRows(stmt.entries)
   const sheet = XLSX.utils.json_to_sheet(rows)
   XLSX.utils.book_append_sheet(wb, sheet, 'الحركات')
 
@@ -68,7 +74,7 @@ export function exportFunderStatementToExcel(stmt: FunderStatement, filename?: s
   ])
   XLSX.utils.book_append_sheet(wb, summarySheet, 'ملخص الممول')
 
-  const rows = stmt.entries.map(entryRow)
+  const rows = entryRows(stmt.entries)
   const sheet = XLSX.utils.json_to_sheet(rows)
   XLSX.utils.book_append_sheet(wb, sheet, 'الحركات')
 
@@ -80,6 +86,7 @@ export function exportFullProjectToExcel(data: {
   totalContributionsQirsh: number
   totalExpensesQirsh: number
   funders: Funder[]
+  categories: ExpenseCategory[]
   entries: LedgerEntry[]
   allocations: ExpenseAllocation[]
 }) {
@@ -110,7 +117,9 @@ export function exportFullProjectToExcel(data: {
   )
   XLSX.utils.book_append_sheet(wb, fundersSheet, 'الممولون')
 
-  const allSheet = XLSX.utils.json_to_sheet(data.entries.map(entryRow))
+  const partyOf = (e: LedgerEntry) =>
+    (e.funderId ? data.funders.find((f) => f.id === e.funderId)?.name : data.categories.find((c) => c.id === e.categoryId)?.name) ?? ''
+  const allSheet = XLSX.utils.json_to_sheet(entryRows(data.entries, partyOf))
   XLSX.utils.book_append_sheet(wb, allSheet, 'كل الحركات')
 
   download(wb, 'تقرير-الصندوق-الكامل.xlsx')

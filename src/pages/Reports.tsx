@@ -28,6 +28,10 @@ import { ItemsReport } from './ItemsReport'
 
 export type ReportsTab = 'full' | 'funder' | 'category' | 'payables' | 'items'
 
+/** A cancelled entry and the reversal that cancelled it. Together they net
+ * to zero, so leaving both out of a report changes none of its totals. */
+const isCancelledPair = (e: LedgerEntry) => e.reversed === true || !!e.reversalOfId
+
 // xlsx / jspdf / html2canvas are heavy — load them only when an export button
 // is actually pressed instead of bloating the app's initial bundle.
 const loadExcel = () => import('../export/excel')
@@ -35,6 +39,10 @@ const loadPdf = () => import('../export/pdf')
 
 export function Reports({ initialCategoryId, initialTab }: { initialCategoryId?: string; initialTab?: ReportsTab }) {
   const [tab, setTab] = useState<ReportsTab>(initialTab ?? (initialCategoryId ? 'category' : 'full'))
+  // Reports show what stands today. Cancelled entries (with the reversals
+  // that cancelled them), cancelled invoices and items, and the "edited"
+  // mark are history: kept in the data, shown only when asked for.
+  const [showHistory, setShowHistory] = useState(false)
 
   return (
     <div className="space-y-4">
@@ -57,11 +65,16 @@ export function Reports({ initialCategoryId, initialTab }: { initialCategoryId?:
         </TabButton>
       </div>
 
-      {tab === 'full' && <FullProjectReport />}
-      {tab === 'funder' && <FunderReport />}
-      {tab === 'category' && <CategoryReport initialCategoryId={initialCategoryId} />}
-      {tab === 'payables' && <PayablesReport onOpenItems={() => setTab('items')} />}
-      {tab === 'items' && <ItemsReport />}
+      <label className="flex items-center justify-between gap-3 px-1">
+        <span className="text-sm text-slate-600">إظهار الملغي وعلامة التعديل</span>
+        <input type="checkbox" checked={showHistory} onChange={(e) => setShowHistory(e.target.checked)} className="w-5 h-5" />
+      </label>
+
+      {tab === 'full' && <FullProjectReport showHistory={showHistory} />}
+      {tab === 'funder' && <FunderReport showHistory={showHistory} />}
+      {tab === 'category' && <CategoryReport initialCategoryId={initialCategoryId} showHistory={showHistory} />}
+      {tab === 'payables' && <PayablesReport showHistory={showHistory} onOpenItems={() => setTab('items')} />}
+      {tab === 'items' && <ItemsReport showHistory={showHistory} />}
     </div>
   )
 }
@@ -89,7 +102,7 @@ function TabButton({
 
 /** One ledger row in a statement. `onChanged` reloads the statement after
  * the entry is cancelled or its details are corrected. */
-function EntryRow({ entry, onChanged }: { entry: LedgerEntry; onChanged: () => void }) {
+function EntryRow({ entry, showHistory, onChanged }: { entry: LedgerEntry; showHistory: boolean; onChanged: () => void }) {
   const [confirming, setConfirming] = useState(false)
   const [editing, setEditing] = useState(false)
   const [reason, setReason] = useState('')
@@ -134,7 +147,7 @@ function EntryRow({ entry, onChanged }: { entry: LedgerEntry; onChanged: () => v
           {entry.counterparty ? ` · ${entry.counterparty}` : ''}
           {entry.invoiceNumber ? ` · فاتورة ${entry.invoiceNumber}` : ''}
           {entry.affectsVault === false && ' · توزيع من دفعة سابقة'}
-          {entry.editedAt && ' · بياناتها اتعدّلت'}
+          {showHistory && entry.editedAt && ' · بياناتها اتعدّلت'}
           {entry.reversed && ' · (ملغاة)'}
           {entry.reversalOfId && ' · حركة إلغاء'}
         </span>
@@ -174,21 +187,28 @@ function EntryRow({ entry, onChanged }: { entry: LedgerEntry; onChanged: () => v
   )
 }
 
-function FullProjectReport() {
+function FullProjectReport({ showHistory }: { showHistory: boolean }) {
   const printRef = useRef<HTMLDivElement>(null)
   const summary = useLiveQuery(getDashboardSummary, [])
   const funders = useLiveQuery(listFunders, [])
+  const categories = useLiveQuery(listCategories, [])
   const entries = useLiveQuery(() => db.ledger.toArray(), [])
   const allocations = useLiveQuery(() => db.allocations.toArray(), [])
 
-  if (!summary || !funders || !entries || !allocations) return null
+  if (!summary || !funders || !categories || !entries || !allocations) return null
+
+  const listed = showHistory ? entries : entries.filter((e) => !isCancelledPair(e))
+  // Who the money came from, or which بند it went to. An item payment has
+  // neither yet: it reaches بنود when the item is distributed.
+  const partyOf = (e: LedgerEntry) =>
+    e.funderId ? funders.find((f) => f.id === e.funderId)?.name : categories.find((c) => c.id === e.categoryId)?.name
 
   return (
     <Card className="space-y-3">
       <div className="flex gap-2">
         <Button
           className="flex-1"
-          onClick={async () => (await loadExcel()).exportFullProjectToExcel({ ...summary, funders, entries, allocations })}
+          onClick={async () => (await loadExcel()).exportFullProjectToExcel({ ...summary, funders, categories, entries: listed, allocations })}
         >
           تصدير Excel
         </Button>
@@ -251,13 +271,16 @@ function FullProjectReport() {
           <thead className="bg-slate-50">
             <tr>
               <th className="p-1.5 text-right">التاريخ</th>
-              <th className="p-1.5 text-right">النوع</th>
+              <th className="p-1.5 text-right">
+                النوع
+                <div className="text-xs font-normal text-slate-500">البند / الممول</div>
+              </th>
               <th className="p-1.5 text-right">الوصف</th>
               <th className="p-1.5 text-right">القيمة</th>
             </tr>
           </thead>
           <tbody>
-            {[...entries].sort((a, b) => a.date.localeCompare(b.date)).map((e) => (
+            {[...listed].sort((a, b) => a.date.localeCompare(b.date)).map((e) => (
               <tr key={e.id} className="border-t border-slate-100">
                 <td className="p-1.5">{e.date}</td>
                 <td className="p-1.5">
@@ -268,6 +291,7 @@ function FullProjectReport() {
                       : e.type === 'ADVANCE'
                         ? 'دفعة صنف'
                         : 'مصروف'}
+                  {partyOf(e) && <div className="text-xs font-semibold text-teal-800 break-words max-w-[90px]">{partyOf(e)}</div>}
                 </td>
                 <td className="p-1.5 break-words max-w-[160px]">{e.description}</td>
                 <td className="p-1.5">{formatEGP(e.amountQirsh)}</td>
@@ -280,7 +304,7 @@ function FullProjectReport() {
   )
 }
 
-function FunderReport() {
+function FunderReport({ showHistory }: { showHistory: boolean }) {
   const funders = useLiveQuery(listFunders, [])
   const [funderId, setFunderId] = useState('')
   const [stmt, setStmt] = useState<FunderStatement | null>(null)
@@ -293,6 +317,8 @@ function FunderReport() {
   }
 
   if (!funders || funders.length === 0) return <EmptyState>لا يوجد ممولون بعد</EmptyState>
+
+  const listed = stmt ? (showHistory ? stmt.entries : stmt.entries.filter((e) => !isCancelledPair(e))) : []
 
   return (
     <div className="space-y-3">
@@ -310,7 +336,7 @@ function FunderReport() {
       {stmt && (
         <Card className="space-y-3">
           <div className="flex gap-2">
-            <Button className="flex-1" onClick={async () => (await loadExcel()).exportFunderStatementToExcel(stmt)}>
+            <Button className="flex-1" onClick={async () => (await loadExcel()).exportFunderStatementToExcel({ ...stmt, entries: listed })}>
               تصدير Excel
             </Button>
             <Button
@@ -345,12 +371,12 @@ function FunderReport() {
               </tbody>
             </table>
             <h3 className="font-bold mb-2">الحركات</h3>
-            {stmt.entries.length === 0 ? (
+            {listed.length === 0 ? (
               <EmptyState>لا توجد حركات</EmptyState>
             ) : (
               <ul className="divide-y divide-slate-100">
-                {stmt.entries.map((e) => (
-                  <EntryRow key={e.id} entry={e} onChanged={() => load(funderId)} />
+                {listed.map((e) => (
+                  <EntryRow key={e.id} entry={e} showHistory={showHistory} onChanged={() => load(funderId)} />
                 ))}
               </ul>
             )}
@@ -361,7 +387,7 @@ function FunderReport() {
   )
 }
 
-function CategoryReport({ initialCategoryId }: { initialCategoryId?: string }) {
+function CategoryReport({ initialCategoryId, showHistory }: { initialCategoryId?: string; showHistory: boolean }) {
   const categories = useLiveQuery(listCategories, [])
   const [categoryId, setCategoryId] = useState(initialCategoryId ?? '')
   const [stmt, setStmt] = useState<CategoryStatement | null>(null)
@@ -380,6 +406,10 @@ function CategoryReport({ initialCategoryId }: { initialCategoryId?: string }) {
 
   if (!categories || categories.length === 0) return <EmptyState>لا توجد بنود بعد</EmptyState>
 
+  const listed = stmt ? (showHistory ? stmt.entries : stmt.entries.filter((e) => !isCancelledPair(e))) : []
+  // A cancelled item's share carries no money, so it is history too.
+  const listedShares = stmt ? (showHistory ? stmt.itemShares : stmt.itemShares.filter((s) => !s.item.cancelled)) : []
+
   return (
     <div className="space-y-3">
       <Card>
@@ -396,7 +426,10 @@ function CategoryReport({ initialCategoryId }: { initialCategoryId?: string }) {
       {stmt && (
         <Card className="space-y-3">
           <div className="flex gap-2">
-            <Button className="flex-1" onClick={async () => (await loadExcel()).exportCategoryStatementToExcel(stmt)}>
+            <Button
+              className="flex-1"
+              onClick={async () => (await loadExcel()).exportCategoryStatementToExcel({ ...stmt, entries: listed, itemShares: listedShares })}
+            >
               تصدير Excel
             </Button>
             <Button
@@ -429,20 +462,20 @@ function CategoryReport({ initialCategoryId }: { initialCategoryId?: string }) {
               </tbody>
             </table>
             <h3 className="font-bold mb-2">الحركات</h3>
-            {stmt.entries.length === 0 ? (
-              stmt.itemShares.length === 0 && <EmptyState>لا توجد حركات</EmptyState>
+            {listed.length === 0 ? (
+              listedShares.length === 0 && <EmptyState>لا توجد حركات</EmptyState>
             ) : (
               <ul className="divide-y divide-slate-100">
-                {stmt.entries.map((e) => (
-                  <EntryRow key={e.id} entry={e} onChanged={() => load(categoryId)} />
+                {listed.map((e) => (
+                  <EntryRow key={e.id} entry={e} showHistory={showHistory} onChanged={() => load(categoryId)} />
                 ))}
               </ul>
             )}
-            {stmt.itemShares.length > 0 && (
+            {listedShares.length > 0 && (
               <>
                 <h3 className="font-bold mt-3 mb-2">نصيب البند من أصناف موزَّعة</h3>
                 <ul className="divide-y divide-slate-100">
-                  {stmt.itemShares.map((s) => (
+                  {listedShares.map((s) => (
                     <li key={s.share.id} className="py-2 text-sm flex justify-between gap-2">
                       <span className="text-slate-700 min-w-0 break-words">
                         {s.item.advance.description} — {describeItemUnits(s.item, s.share.units)}
@@ -464,7 +497,7 @@ function CategoryReport({ initialCategoryId }: { initialCategoryId?: string }) {
   )
 }
 
-function PayablesReport({ onOpenItems }: { onOpenItems: () => void }) {
+function PayablesReport({ showHistory, onOpenItems }: { showHistory: boolean; onOpenItems: () => void }) {
   const payables = useLiveQuery(listAllPayables, [])
   const items = useLiveQuery(listAdvanceItems, [])
   const [settlingId, setSettlingId] = useState<string | null>(null)
@@ -474,7 +507,9 @@ function PayablesReport({ onOpenItems }: { onOpenItems: () => void }) {
   if (!payables || !items) return null
 
   const open = payables.filter((p) => p.remainingQirsh > 0).sort((a, b) => a.payable.date.localeCompare(b.payable.date))
-  const closed = payables.filter((p) => p.remainingQirsh <= 0)
+  // A cancelled invoice is history, except one that still has settlement
+  // money counted on its بند: that needs the user's attention either way.
+  const closed = payables.filter((p) => p.remainingQirsh <= 0 && (showHistory || !p.cancelled || p.paidQirsh > 0))
   // Items whose full price is known and not fully paid are owed to a supplier too.
   const owedItems = items.filter((i) => (i.owedQirsh ?? 0) > 0)
   const settling = payables.find((p) => p.payable.id === settlingId)
@@ -565,7 +600,8 @@ function PayablesReport({ onOpenItems }: { onOpenItems: () => void }) {
       {closed.length > 0 && (
         <>
           <button className="text-sm text-teal-700 font-semibold" onClick={() => setShowClosed((v) => !v)}>
-            {showClosed ? 'إخفاء' : 'عرض'} المستحقات المقفولة: خالصة أو ملغاة ({formatUnits(closed.length)})
+            {showClosed ? 'إخفاء' : 'عرض'} {showHistory ? 'المستحقات المقفولة: خالصة أو ملغاة' : 'المستحقات اللي اتسددت بالكامل'} (
+            {formatUnits(closed.length)})
           </button>
           {showClosed && closed.map(payableCard)}
         </>

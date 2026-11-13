@@ -24,14 +24,17 @@ const errorText = (e: unknown) => (e instanceof LedgerError ? e.message : 'حد�
 
 /** Items bought for several بنود, and advances paid before their بند was
  * known: what was paid for each, how it's split across بنود, what's left. */
-export function ItemsReport() {
-  const items = useLiveQuery(listAdvanceItems, [])
+export function ItemsReport({ showHistory }: { showHistory: boolean }) {
+  const allItems = useLiveQuery(listAdvanceItems, [])
   const categories = useLiveQuery(listCategories, [])
   const [distributingId, setDistributingId] = useState<string | null>(null)
   const [payingId, setPayingId] = useState<string | null>(null)
   const [showDone, setShowDone] = useState(false)
 
-  if (!items || !categories) return null
+  if (!allItems || !categories) return null
+
+  // An item whose every payment was cancelled is history, like a cancelled entry.
+  const items = showHistory ? allItems : allItems.filter((i) => !i.cancelled)
 
   if (items.length === 0) {
     return (
@@ -57,6 +60,7 @@ export function ItemsReport() {
     <ItemCard
       key={item.advance.id}
       item={item}
+      showHistory={showHistory}
       categoryName={categoryName}
       hasCategories={activeCategories.length > 0}
       onDistribute={() => setDistributingId(item.advance.id)}
@@ -104,12 +108,14 @@ export function ItemsReport() {
 
 function ItemCard({
   item,
+  showHistory,
   categoryName,
   hasCategories,
   onDistribute,
   onPay,
 }: {
   item: AdvanceStatus
+  showHistory: boolean
   categoryName: (id: string) => string
   hasCategories: boolean
   onDistribute: () => void
@@ -120,6 +126,7 @@ function ItemCard({
   const [editingPayment, setEditingPayment] = useState<LedgerEntry | null>(null)
   const { advance } = item
   const fixedRows = item.allocationEntries.filter((e) => !e.reversalOfId && !e.reversed)
+  const payments = showHistory ? item.payments : item.payments.filter((p) => !p.reversed)
   const usesShares = item.hasQuantity || item.shares.length > 0
   const canDistribute = usesShares ? item.remainingUnits > 0 : item.remainingQirsh > 0
 
@@ -215,12 +222,14 @@ function ItemCard({
         </ul>
       )}
 
-      <button className="text-xs text-teal-700 font-semibold mt-3" onClick={() => setShowPayments((v) => !v)}>
-        {showPayments ? 'إخفاء' : 'عرض'} الدفعات ({formatUnits(item.payments.length)})
-      </button>
+      {payments.length > 0 && (
+        <button className="text-xs text-teal-700 font-semibold mt-3" onClick={() => setShowPayments((v) => !v)}>
+          {showPayments ? 'إخفاء' : 'عرض'} الدفعات ({formatUnits(payments.length)})
+        </button>
+      )}
       {showPayments && (
         <ul className="divide-y divide-slate-100">
-          {item.payments.map((p) => (
+          {payments.map((p) => (
             <li key={p.id} className="py-2 text-sm">
               <div className="flex justify-between gap-2">
                 <span className={p.reversed ? 'text-slate-400 line-through' : 'text-slate-700'}>
