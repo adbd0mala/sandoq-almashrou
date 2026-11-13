@@ -5,7 +5,7 @@ import { egpToQirsh, roundPercentsForDisplay } from '../domain/money'
 import { Banner, Button, Card, EmptyState, Field, Modal, PageTitle, inputClass } from '../components/ui'
 import type { Funder } from '../domain/types'
 
-export function Funders() {
+export function Funders({ onOpenPayments }: { onOpenPayments: (funderId?: string) => void }) {
   const funders = useLiveQuery(listFunders, [])
   const [showAdd, setShowAdd] = useState(false)
   const [showShares, setShowShares] = useState(false)
@@ -26,6 +26,12 @@ export function Funders() {
         <Banner kind="error">تحذير: إجمالي نسب تحمل المصروفات الحالية {shareSum.toFixed(2)}% وليس 100%. صحّح النسب قبل تسجيل مصروف جديد.</Banner>
       )}
 
+      {(funders ?? []).length > 0 && (
+        <Button variant="secondary" className="w-full" onClick={() => onOpenPayments()}>
+          جدول دفعات الممولين ‹
+        </Button>
+      )}
+
       {active.length === 0 ? (
         <EmptyState>لا يوجد ممولون بعد. اضغط "+ ممول جديد" للبدء</EmptyState>
       ) : (
@@ -38,11 +44,12 @@ export function Funders() {
           </div>
           <ul className="divide-y divide-slate-100">
             {active.map((f) => (
-              <li key={f.id} className="py-3 flex items-center justify-between">
-                <div>
-                  <div className="font-semibold text-slate-800">{f.name}</div>
+              <li key={f.id} className="py-3 flex items-center justify-between gap-2">
+                <button className="min-w-0 text-right" onClick={() => onOpenPayments(f.id)}>
+                  <div className="font-semibold text-slate-800 break-words">{f.name}</div>
                   <div className="text-xs text-slate-400">{f.phone}</div>
-                </div>
+                  <div className="text-xs text-teal-700 font-semibold">عرض دفعاته ‹</div>
+                </button>
                 <div className="flex items-center gap-3">
                   <span className="font-bold text-teal-700 tabular-nums">{f.sharePercent.toFixed(2)}%</span>
                   <Button variant="ghost" onClick={() => setEditing(f)}>
@@ -60,8 +67,10 @@ export function Funders() {
           <h3 className="font-bold text-slate-500 mb-2 text-sm">ممولون مؤرشفون</h3>
           <ul className="divide-y divide-slate-100">
             {archived.map((f) => (
-              <li key={f.id} className="py-2 text-sm text-slate-400 flex items-center justify-between">
-                {f.name}
+              <li key={f.id} className="py-2 text-sm text-slate-400 flex items-center justify-between gap-2">
+                <button className="min-w-0 break-words text-right" onClick={() => onOpenPayments(f.id)}>
+                  {f.name}
+                </button>
                 <button className="text-teal-700 font-semibold text-xs" onClick={() => unarchiveFunder(f.id).catch((e) => setError(e instanceof LedgerError ? e.message : 'حدث خطأ غير متوقع'))}>
                   إلغاء الأرشفة
                 </button>

@@ -1280,6 +1280,30 @@ export async function getFunderStatement(funderId: string): Promise<FunderStatem
   }
 }
 
+export interface FunderPayments {
+  funder: Funder
+  /** The funder's standing contributions, oldest first. Cancelled ones and
+   * the reversals that cancelled them are left out: together they add
+   * nothing to the total. */
+  payments: LedgerEntry[]
+  totalPaidQirsh: number
+}
+
+/** What each funder has paid in, payment by payment. Active funders first;
+ * an archived funder is listed only if they paid something. */
+export async function listFunderPayments(): Promise<FunderPayments[]> {
+  const [funders, contributions] = await Promise.all([listFunders(), db.ledger.where('type').equals('CONTRIBUTION').toArray()])
+  return funders
+    .map((funder) => {
+      const payments = contributions
+        .filter((e) => e.funderId === funder.id && !e.reversed && !e.reversalOfId)
+        .sort((a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt))
+      return { funder, payments, totalPaidQirsh: payments.reduce((s, e) => s + e.amountQirsh, 0) }
+    })
+    .filter((f) => f.funder.active || f.payments.length > 0)
+    .sort((a, b) => Number(b.funder.active) - Number(a.funder.active))
+}
+
 /** A بند's part of an item distributed by units/percent (see AdvanceShare). */
 export interface CategoryItemShare {
   item: AdvanceStatus

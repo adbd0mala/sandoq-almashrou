@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Dashboard } from './pages/Dashboard'
 import { Funders } from './pages/Funders'
+import { FunderPayments } from './pages/FunderPayments'
 import { Categories } from './pages/Categories'
 import { RecordExpense } from './pages/RecordExpense'
 import { RecordContribution } from './pages/RecordContribution'
@@ -8,7 +9,7 @@ import { Reports, type ReportsTab } from './pages/Reports'
 import { BackupPage } from './pages/BackupPage'
 import { runDailyAutoBackupIfDue } from './backup/backup'
 
-type Tab = 'home' | 'expense' | 'contribution' | 'funders' | 'categories' | 'reports' | 'backup'
+type Tab = 'home' | 'expense' | 'contribution' | 'funders' | 'funderPayments' | 'categories' | 'reports' | 'backup'
 
 const NAV: { tab: Tab; label: string; icon: string }[] = [
   { tab: 'home', label: 'الرئيسية', icon: '🏠' },
@@ -22,6 +23,7 @@ export default function App() {
   const [tab, setTab] = useState<Tab>('home')
   const [reportCategoryId, setReportCategoryId] = useState<string | undefined>(undefined)
   const [reportsTab, setReportsTab] = useState<ReportsTab | undefined>(undefined)
+  const [paymentsFunderId, setPaymentsFunderId] = useState<string | undefined>(undefined)
 
   useEffect(() => {
     const tryBackup = () =>
@@ -43,6 +45,12 @@ export default function App() {
     setTab('reports')
   }
 
+  /** The payments tables, optionally scrolled to one funder's table. */
+  function openFunderPayments(funderId?: string) {
+    setPaymentsFunderId(funderId)
+    setTab('funderPayments')
+  }
+
   function openReport(reportTab: ReportsTab) {
     setReportCategoryId(undefined)
     setReportsTab(reportTab)
@@ -55,7 +63,8 @@ export default function App() {
         {tab === 'home' && <Dashboard onNavigate={(t) => setTab(t as Tab)} onOpenReport={openReport} />}
         {tab === 'expense' && <RecordExpense onDone={() => setTab('home')} />}
         {tab === 'contribution' && <RecordContribution onDone={() => setTab('home')} />}
-        {tab === 'funders' && <Funders />}
+        {tab === 'funders' && <Funders onOpenPayments={openFunderPayments} />}
+        {tab === 'funderPayments' && <FunderPayments focusFunderId={paymentsFunderId} onBack={() => setTab('funders')} />}
         {tab === 'categories' && <Categories onOpenStatement={openCategoryStatement} />}
         {tab === 'reports' && <Reports initialCategoryId={reportCategoryId} initialTab={reportsTab} />}
         {tab === 'backup' && <BackupPage />}
@@ -73,7 +82,7 @@ export default function App() {
               setTab(n.tab)
             }}
             className={`flex-1 py-2.5 flex flex-col items-center gap-0.5 text-xs ${
-              tab === n.tab ? 'text-teal-700 font-bold' : 'text-slate-400'
+              tab === n.tab || (n.tab === 'funders' && tab === 'funderPayments') ? 'text-teal-700 font-bold' : 'text-slate-400'
             }`}
           >
             <span className="text-lg">{n.icon}</span>
