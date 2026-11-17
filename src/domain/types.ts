@@ -71,10 +71,34 @@ export interface LedgerEntry {
    * what the item costs in total. Not money that moved — just what lets
    * "still owed to the supplier" be shown as this minus what's been paid. */
   agreedTotalQirsh?: number
+  /** Only on an item's first ADVANCE entry: the discounts and additions
+   * made to its full price / quantity after it was recorded, oldest first.
+   * A log of why those two numbers changed — agreedTotalQirsh and quantity
+   * above always hold the current values. */
+  adjustments?: ItemAdjustment[]
   /** When the entry's wording (description, date, supplier, payment method,
    * invoice number) was last corrected. Its amount, بند and funder can never
    * be edited — only reversed — so this never marks a change in money. */
   editedAt?: string
+}
+
+/** A change to an item's account agreed with the supplier after the item
+ * was recorded. No money moves: a DISCOUNT lowers the full price (knocked
+ * off when settling up), an ADDITION raises it and/or the quantity (one
+ * more نقلة on the same order). What is still owed follows from the price. */
+export type ItemAdjustmentKind = 'DISCOUNT' | 'ADDITION'
+
+export interface ItemAdjustment {
+  id: string
+  kind: ItemAdjustmentKind
+  /** Taken off the full price (DISCOUNT) or put onto it (ADDITION). 0 when
+   * an addition only raised the quantity. */
+  amountQirsh: number
+  /** ADDITION only: extra units bought. */
+  units?: number
+  note?: string
+  date: string
+  createdAt: string
 }
 
 /** One بند's share of an item (an ADVANCE and its follow-up payments),

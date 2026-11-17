@@ -3,12 +3,14 @@ import { useState } from 'react'
 import {
   LedgerError,
   addAdvanceShares,
+  adjustAdvanceItem,
   allocateAdvance,
   describeItemUnits,
   listAdvanceItems,
   listCategories,
   recordAdvancePayment,
   removeAdvanceShare,
+  removeItemAdjustment,
   reverseEntry,
   setAdvanceAgreedTotal,
   updateAdvanceItem,
@@ -17,7 +19,14 @@ import {
 import { egpToQirsh, formatEGP, formatUnits } from '../domain/money'
 import { Banner, Button, Card, EmptyState, Field, Modal, inputClass } from '../components/ui'
 import { EditEntryModal } from '../components/EditEntryModal'
-import { PAYMENT_METHOD_LABELS, type ExpenseCategory, type LedgerEntry, type PaymentMethod } from '../domain/types'
+import {
+  PAYMENT_METHOD_LABELS,
+  type ExpenseCategory,
+  type ItemAdjustment,
+  type ItemAdjustmentKind,
+  type LedgerEntry,
+  type PaymentMethod,
+} from '../domain/types'
 
 const todayIso = () => new Date().toISOString().slice(0, 10)
 const errorText = (e: unknown) => (e instanceof LedgerError ? e.message : 'حدث خطأ غير متوقع')
@@ -124,7 +133,30 @@ function ItemCard({
   const [showPayments, setShowPayments] = useState(false)
   const [editingItem, setEditingItem] = useState(false)
   const [editingPayment, setEditingPayment] = useState<LedgerEntry | null>(null)
+  const [adjusting, setAdjusting] = useState(false)
+  const [adjustmentError, setAdjustmentError] = useState('')
   const { advance } = item
+  const adjustments = advance.adjustments ?? []
+  const unit = advance.unitName || 'وحدة'
+
+  const describeAdjustment = (a: ItemAdjustment) =>
+    [
+      a.kind === 'DISCOUNT' ? 'خصم' : 'إضافة',
+      a.amountQirsh > 0 ? formatEGP(a.amountQirsh) : '',
+      a.units ? `+ ${formatUnits(a.units)} ${unit}` : '',
+    ]
+      .filter(Boolean)
+      .join(' ')
+
+  async function removeAdjustment(a: ItemAdjustment) {
+    if (!confirm(`هتلغي «${describeAdjustment(a)}» وترجّع حساب الصنف زي ما كان قبله. متأكد؟`)) return
+    try {
+      setAdjustmentError('')
+      await removeItemAdjustment(advance.id, a.id)
+    } catch (e) {
+      setAdjustmentError(errorText(e))
+    }
+  }
   const fixedRows = item.allocationEntries.filter((e) => !e.reversalOfId && !e.reversed)
   const payments = showHistory ? item.payments : item.payments.filter((p) => !p.reversed)
   const usesShares = item.hasQuantity || item.shares.length > 0
@@ -176,6 +208,24 @@ function ItemCard({
         </p>
       ) : (
         <AgreedTotalControl item={item} />
+      )}
+      {adjustments.length > 0 && (
+        <ul className="mt-2 mb-1 text-xs space-y-1 bg-slate-50 rounded-lg p-2">
+          {adjustments.map((a) => (
+            <li key={a.id} className="flex justify-between items-start gap-2">
+              <span className="text-slate-600 min-w-0 break-words">
+                <span className={`font-semibold ${a.kind === 'DISCOUNT' ? 'text-emerald-700' : 'text-amber-700'}`}>{describeAdjustment(a)}</span>
+                {' · '}
+                {a.date}
+                {a.note && ` · ${a.note}`}
+              </span>
+              <button className="text-red-500 shrink-0" onClick={() => removeAdjustment(a)}>
+                حذف
+              </button>
+            </li>
+          ))}
+          {adjustmentError && <li className="text-red-600">{adjustmentError}</li>}
+        </ul>
       )}
       <div className="flex justify-between text-sm mt-1">
         <span className="text-slate-500">غير موزَّع على بنود</span>
@@ -266,11 +316,176 @@ function ItemCard({
           إضافة دفعة
         </Button>
       </div>
+      {!item.cancelled && (
+        <Button variant="secondary" className="w-full mt-2" onClick={() => setAdjusting(true)}>
+          خصم أو إضافة على الحساب
+        </Button>
+      )}
       {canDistribute && !hasCategories && <div className="text-xs text-red-500 mt-2">أضف بند مصروفات أولاً عشان تقدر توزّع الصنف ده</div>}
 
+      {adjusting && <AdjustItemModal item={item} onClose={() => setAdjusting(false)} />}
       {editingItem && <EditItemModal item={item} onClose={() => setEditingItem(false)} />}
       {editingPayment && <EditEntryModal entry={editingPayment} onClose={() => setEditingPayment(null)} />}
     </Card>
+  )
+}
+
+/** A discount the supplier gave on the item's full price when settling up,
+ * or an addition to the same order (one more نقلة, an extra charge). Only
+ * the price and quantity change here; paying for it is "إضافة دفعة". */
+function AdjustItemModal({ item, onClose }: { item: AdvanceStatus; onClose: () => void }) {
+  const { advance } = item
+  const [kind, setKind] = useState<ItemAdjustmentKind>('DISCOUNT')
+  const [amount, setAmount] = useState('')
+  const [units, setUnits] = useState('')
+  const [note, setNote] = useState('')
+  const [date, setDate] = useState(todayIso())
+  const [error, setError] = useState('')
+
+  const total = item.agreedTotalQirsh
+  const leftToPay = total === null ? null : Math.max(0, total - item.totalPaidQirsh)
+  const amountQirsh = Number(amount) > 0 ? egpToQirsh(Number(amount)) : 0
+  const extraUnits = item.hasQuantity && Number(units) > 0 ? Number(units) : 0
+  const unit = advance.unitName || 'وحدة'
+  const isDiscount = kind === 'DISCOUNT'
+  const discountTooBig = isDiscount && leftToPay !== null && amountQirsh > leftToPay
+  // What the extra units cost at the price the rest of the order was bought at.
+  const samePriceQirsh = total !== null && extraUnits > 0 ? Math.round((total / item.basisUnits) * extraUnits) : 0
+
+  const canDiscount = total !== null && leftToPay !== null && leftToPay > 0
+  const canAdd = total !== null || item.hasQuantity
+  const canSave = isDiscount ? canDiscount && amountQirsh > 0 && !discountTooBig : (total !== null && amountQirsh > 0) || extraUnits > 0
+
+  function switchKind(next: ItemAdjustmentKind) {
+    setKind(next)
+    setAmount('')
+    setUnits('')
+    setError('')
+  }
+
+  async function save() {
+    setError('')
+    try {
+      await adjustAdvanceItem({
+        advanceId: advance.id,
+        kind,
+        amountQirsh: isDiscount || total !== null ? amountQirsh : 0,
+        units: isDiscount ? undefined : extraUnits,
+        note,
+        date,
+      })
+      onClose()
+    } catch (e) {
+      setError(errorText(e))
+    }
+  }
+
+  return (
+    <Modal open onClose={onClose} title={`حساب الصنف: ${advance.description}`}>
+      {error && <Banner kind="error">{error}</Banner>}
+      <p className="text-xs text-slate-500 mb-3">
+        {total === null ? 'إجمالي الحساب لسه مش محدد' : `إجمالي الحساب ${formatEGP(total)}`} · المدفوع {formatEGP(item.totalPaidQirsh)}
+        {leftToPay !== null && ` · الباقي للمورد ${formatEGP(leftToPay)}`}
+        {item.hasQuantity && ` · الكمية ${formatUnits(item.basisUnits)} ${unit}`}
+      </p>
+      <div className="grid grid-cols-2 gap-1 bg-slate-100 rounded-xl p-1 mb-3">
+        {(['DISCOUNT', 'ADDITION'] as const).map((k) => (
+          <button
+            key={k}
+            onClick={() => switchKind(k)}
+            className={`py-2 rounded-lg text-sm font-semibold transition ${kind === k ? 'bg-white shadow text-teal-700' : 'text-slate-500'}`}
+          >
+            {k === 'DISCOUNT' ? 'خصم' : 'إضافة'}
+          </button>
+        ))}
+      </div>
+
+      {isDiscount ? (
+        total === null ? (
+          <p className="text-sm text-slate-600 mb-3">
+            عشان تسجّل خصم لازم إجمالي حساب الصنف يكون محدد. حدده من «تحديد إجمالي الحساب» في كارت الصنف وارجع هنا.
+          </p>
+        ) : !canDiscount ? (
+          <p className="text-sm text-slate-600 mb-3">
+            الصنف خالص، فمفيش باقي يتخصم منه. لو المورد رجّعلك فلوس، الغِ آخر دفعة من «عرض الدفعات» وسجّلها بالقيمة بعد الخصم.
+          </p>
+        ) : (
+          <>
+            <Field label="قيمة الخصم (ج.م)">
+              <input type="number" inputMode="decimal" className={inputClass} value={amount} onChange={(e) => setAmount(e.target.value)} />
+            </Field>
+            {discountTooBig ? (
+              <p className="text-xs text-red-600 -mt-2 mb-3">الخصم أكبر من الباقي للمورد ({formatEGP(leftToPay ?? 0)})</p>
+            ) : (
+              amountQirsh > 0 && (
+                <p className="text-xs text-slate-500 -mt-2 mb-3">
+                  الحساب بعد الخصم: {formatEGP(total - amountQirsh)} · الباقي للمورد: {formatEGP((leftToPay ?? 0) - amountQirsh)}
+                </p>
+              )
+            )}
+          </>
+        )
+      ) : !canAdd ? (
+        <p className="text-sm text-slate-600 mb-3">
+          الصنف ده مالوش إجمالي حساب ولا كمية، فمفيش حاجة تتزوّد عليها. لو دفعت للمورد زيادة استخدم «إضافة دفعة»، أو حدد إجمالي الحساب الأول.
+        </p>
+      ) : (
+        <>
+          {item.hasQuantity && (
+            <Field label={`الكمية الإضافية (${unit})`}>
+              <input type="number" inputMode="decimal" className={inputClass} value={units} onChange={(e) => setUnits(e.target.value)} />
+            </Field>
+          )}
+          {total !== null ? (
+            <>
+              <Field label="قيمة الإضافة (ج.م)">
+                <input type="number" inputMode="decimal" className={inputClass} value={amount} onChange={(e) => setAmount(e.target.value)} />
+              </Field>
+              {samePriceQirsh > 0 && (
+                <button className="block text-teal-700 text-xs font-semibold -mt-2 mb-3" onClick={() => setAmount(String(samePriceQirsh / 100))}>
+                  بنفس سعر ال{unit}: {formatEGP(samePriceQirsh)}
+                </button>
+              )}
+            </>
+          ) : (
+            <p className="text-xs text-slate-500 -mt-2 mb-3">إجمالي حساب الصنف مش محدد، فالإضافة بتزوّد الكمية بس.</p>
+          )}
+          {(amountQirsh > 0 || extraUnits > 0) && (
+            <p className="text-xs text-slate-500 mb-3">
+              بعد الإضافة:
+              {item.hasQuantity && ` الكمية ${formatUnits(item.basisUnits + extraUnits)} ${unit}`}
+              {total !== null && ` · الحساب ${formatEGP(total + amountQirsh)} · الباقي للمورد ${formatEGP((leftToPay ?? 0) + amountQirsh)}`}
+            </p>
+          )}
+        </>
+      )}
+
+      {(isDiscount ? canDiscount : canAdd) && (
+        <>
+          <Field label="السبب (اختياري)">
+            <input
+              className={inputClass}
+              value={note}
+              maxLength={80}
+              placeholder={isDiscount ? 'مثال: خصم عند المحاسبة' : 'مثال: نقلة زيادة'}
+              onChange={(e) => setNote(e.target.value)}
+            />
+          </Field>
+          <Field label="التاريخ">
+            <input type="date" className={inputClass} value={date} onChange={(e) => setDate(e.target.value)} />
+          </Field>
+          <p className="text-xs text-slate-500 mb-3">التعديل ده مبيحركش فلوس من الصندوق. الدفع للمورد بيتسجل من «إضافة دفعة».</p>
+        </>
+      )}
+      <div className="flex gap-2">
+        <Button className="flex-1" onClick={save} disabled={!canSave || !date}>
+          {isDiscount ? 'تسجيل الخصم' : 'تسجيل الإضافة'}
+        </Button>
+        <Button variant="secondary" onClick={onClose}>
+          رجوع
+        </Button>
+      </div>
+    </Modal>
   )
 }
 

@@ -1,5 +1,14 @@
 import { db, ensureSettings, newId } from '../db/db'
-import type { AdvanceShare, ExpenseCategory, Funder, LedgerEntry, Payable, PaymentMethod } from './types'
+import type {
+  AdvanceShare,
+  ExpenseCategory,
+  Funder,
+  ItemAdjustment,
+  ItemAdjustmentKind,
+  LedgerEntry,
+  Payable,
+  PaymentMethod,
+} from './types'
 import { formatEGP, formatUnits, splitProportionally } from './money'
 
 export class LedgerError extends Error {}
@@ -1227,6 +1236,103 @@ export async function updateAdvanceItem(advanceId: string, patch: UpdateAdvanceI
 
     await relabelItemRows(advance, name, counterparty)
     await db.ledger.update(advanceId, { description: name, counterparty, quantity: quantity ?? undefined, unitName })
+  })
+}
+
+export interface AdjustAdvanceItemInput {
+  advanceId: string
+  kind: ItemAdjustmentKind
+  /** Off the full price (DISCOUNT) or onto it (ADDITION). May be 0 for an
+   * addition that only raises the quantity. */
+  amountQirsh: number
+  /** ADDITION only: extra units bought on the same order. */
+  units?: number
+  note?: string
+  date: string
+}
+
+/** Records a discount on an item's full price, or an addition to its price
+ * and/or quantity, and applies it. No money moves: a discount only lowers
+ * what is still owed, so it can't be more than that; an addition is paid
+ * for afterwards like the rest of the item. */
+export async function adjustAdvanceItem(input: AdjustAdvanceItemInput): Promise<void> {
+  await db.transaction('rw', [db.ledger, db.advanceShares], async () => {
+    const status = await getAdvanceStatus(input.advanceId)
+    const { advance, agreedTotalQirsh, totalPaidQirsh } = status
+    assertIsoDate(input.date)
+    const amountQirsh = input.amountQirsh
+    const units = input.kind === 'ADDITION' ? (input.units ?? 0) : 0
+    if (amountQirsh < 0 || units < 0) throw new LedgerError('القيمة لا يمكن أن تكون بالسالب')
+
+    const patch: Partial<LedgerEntry> = {}
+    if (input.kind === 'DISCOUNT') {
+      if (!(amountQirsh > 0)) throw new LedgerError('قيمة الخصم يجب أن تكون أكبر من صفر')
+      if (agreedTotalQirsh === null) throw new LedgerError('حدد إجمالي حساب الصنف الأول، وبعدين سجّل الخصم عليه')
+      const leftToPayQirsh = Math.max(0, agreedTotalQirsh - totalPaidQirsh)
+      if (amountQirsh > leftToPayQirsh) {
+        throw new LedgerError(`الخصم أكبر من الباقي للمورد (${formatEGP(leftToPayQirsh)})`)
+      }
+      if (agreedTotalQirsh - amountQirsh <= 0) throw new LedgerError('الخصم لا يمكن أن يساوي حساب الصنف كله')
+      patch.agreedTotalQirsh = agreedTotalQirsh - amountQirsh
+    } else {
+      if (!(amountQirsh > 0) && !(units > 0)) throw new LedgerError('اكتب قيمة الإضافة أو الكمية الإضافية')
+      if (amountQirsh > 0) {
+        if (agreedTotalQirsh === null) throw new LedgerError('حدد إجمالي حساب الصنف الأول عشان تزوّد عليه')
+        patch.agreedTotalQirsh = agreedTotalQirsh + amountQirsh
+      }
+      if (units > 0) {
+        if (!status.hasQuantity) throw new LedgerError('الصنف ده مالوش كمية. حدد كميته من «تعديل بيانات الصنف» الأول')
+        patch.quantity = advance.quantity! + units
+      }
+    }
+
+    const adjustment: ItemAdjustment = {
+      id: newId(),
+      kind: input.kind,
+      amountQirsh,
+      units: units > 0 ? units : undefined,
+      note: input.note?.trim() || undefined,
+      date: input.date,
+      createdAt: new Date().toISOString(),
+    }
+    await db.ledger.update(advance.id, { ...patch, adjustments: [...(advance.adjustments ?? []), adjustment] })
+  })
+}
+
+/** Takes a discount or addition back: undoes its effect on the price and
+ * quantity as they stand now, and drops it from the item's log. An addition
+ * can't be taken back once its money was paid or its units given to بنود. */
+export async function removeItemAdjustment(advanceId: string, adjustmentId: string): Promise<void> {
+  await db.transaction('rw', [db.ledger, db.advanceShares], async () => {
+    const status = await getAdvanceStatus(advanceId)
+    const { advance } = status
+    const list = advance.adjustments ?? []
+    const adjustment = list.find((a) => a.id === adjustmentId)
+    if (!adjustment) throw new LedgerError('التعديل غير موجود')
+
+    const rest = list.filter((a) => a.id !== adjustmentId)
+    const patch: Partial<LedgerEntry> = { adjustments: rest.length > 0 ? rest : undefined }
+
+    // If the full price was cleared since (or the quantity removed), there
+    // is nothing left of this adjustment to undo there — only the log row.
+    if (status.agreedTotalQirsh !== null && adjustment.amountQirsh > 0) {
+      const total = status.agreedTotalQirsh + (adjustment.kind === 'DISCOUNT' ? adjustment.amountQirsh : -adjustment.amountQirsh)
+      if (total <= 0 || total < status.totalPaidQirsh) {
+        throw new LedgerError(
+          `مينفعش تتحذف الإضافة دي: المدفوع للصنف (${formatEGP(status.totalPaidQirsh)}) أكبر من حسابه من غيرها. الغِ الدفعة الزيادة الأول`,
+        )
+      }
+      patch.agreedTotalQirsh = total
+    }
+    if (adjustment.units && status.hasQuantity) {
+      const quantity = advance.quantity! - adjustment.units
+      const distributed = status.shares.reduce((s, c) => s + c.share.units, 0)
+      if (!(quantity > 0) || quantity < distributed - UNIT_EPSILON) {
+        throw new LedgerError('مينفعش تتحذف الإضافة دي: الكمية اللي فيها اتوزّعت على بنود. احذف التوزيع ده الأول')
+      }
+      patch.quantity = quantity
+    }
+    await db.ledger.update(advanceId, patch)
   })
 }
 
