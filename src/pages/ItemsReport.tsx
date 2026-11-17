@@ -19,6 +19,7 @@ import {
 import { egpToQirsh, formatEGP, formatUnits } from '../domain/money'
 import { Banner, Button, Card, EmptyState, Field, Modal, inputClass } from '../components/ui'
 import { EditEntryModal } from '../components/EditEntryModal'
+import { SupplierInput } from '../components/SupplierInput'
 import {
   PAYMENT_METHOD_LABELS,
   type ExpenseCategory,
@@ -537,7 +538,7 @@ function EditItemModal({ item, onClose }: { item: AdvanceStatus; onClose: () => 
         <input className={inputClass} value={name} maxLength={80} onChange={(e) => setName(e.target.value)} />
       </Field>
       <Field label="المورد / المستفيد (اختياري)">
-        <input className={inputClass} value={counterparty} onChange={(e) => setCounterparty(e.target.value)} />
+        <SupplierInput value={counterparty} onChange={setCounterparty} />
       </Field>
       {fixedOnly ? (
         <p className="text-xs text-slate-500 mb-3">الصنف ده متوزَّع على بنود بمبالغ ثابتة، فمالوش كمية أو وحدة.</p>

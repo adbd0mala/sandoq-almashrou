@@ -29,6 +29,7 @@ import {
 import { egpToQirsh, formatEGP, formatUnits } from '../domain/money'
 import { Banner, Button, Card, EmptyState, Field, Modal, PageTitle, inputClass } from '../components/ui'
 import { EditEntryModal } from '../components/EditEntryModal'
+import { SupplierInput } from '../components/SupplierInput'
 import { PAYMENT_METHOD_LABELS, type LedgerEntry, type PaymentMethod } from '../domain/types'
 import { ItemsReport } from './ItemsReport'
 
@@ -788,7 +789,7 @@ function EditPayableModal({ status, onClose }: { status: PayableStatus; onClose:
     <Modal open onClose={onClose} title="تعديل المستحق">
       {error && <Banner kind="error">{error}</Banner>}
       <Field label="اسم المورد">
-        <input className={inputClass} value={supplierName} maxLength={80} onChange={(e) => setSupplierName(e.target.value)} />
+        <SupplierInput value={supplierName} onChange={setSupplierName} />
       </Field>
       <Field label="إجمالي الفاتورة (ج.م)">
         <input type="number" inputMode="decimal" className={inputClass} value={total} onChange={(e) => setTotal(e.target.value)} />

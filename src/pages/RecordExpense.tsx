@@ -5,7 +5,6 @@ import {
   getVaultBalanceQirsh,
   listCategories,
   listSupplierAccounts,
-  listSupplierNames,
   recordAdvance,
   recordExpense,
   recordExpenseWithPayable,
@@ -15,20 +14,17 @@ import {
 } from '../domain/ledger'
 import { egpToQirsh, formatEGP } from '../domain/money'
 import { Banner, Button, Card, Field, PageTitle, inputClass } from '../components/ui'
+import { SupplierInput } from '../components/SupplierInput'
 import { PAYMENT_METHOD_LABELS, type ExpenseCategory, type PaymentMethod } from '../domain/types'
 
 const todayIso = () => new Date().toISOString().slice(0, 10)
 
 type Mode = 'single' | 'split' | 'advance'
 
-/** Suggestions for every supplier field on this screen (see listSupplierNames). */
-const SUPPLIER_LIST_ID = 'supplier-names'
-
 /** `initialSupplier` opens the screen ready to add an item to that supplier's account. */
 export function RecordExpense({ onDone, initialSupplier }: { onDone: () => void; initialSupplier?: string }) {
   const activeCategories = useLiveQuery(async () => (await listCategories()).filter((c) => c.active), [])
   const balanceQirsh = useLiveQuery(getVaultBalanceQirsh, [])
-  const supplierNames = useLiveQuery(listSupplierNames, [])
   const [mode, setMode] = useState<Mode>(initialSupplier ? 'advance' : 'single')
 
   const list = activeCategories ?? []
@@ -61,12 +57,6 @@ export function RecordExpense({ onDone, initialSupplier }: { onDone: () => void;
       {mode === 'split' && !noCategories && <SplitExpenseForm categories={list} balanceQirsh={balanceQirsh} onDone={onDone} />}
       {mode === 'single' && !noCategories && <SingleExpenseForm categories={list} balanceQirsh={balanceQirsh} onDone={onDone} />}
       {mode === 'advance' && <AdvanceForm balanceQirsh={balanceQirsh} initialSupplier={initialSupplier} onDone={onDone} />}
-
-      <datalist id={SUPPLIER_LIST_ID}>
-        {(supplierNames ?? []).map((name) => (
-          <option key={name} value={name} />
-        ))}
-      </datalist>
     </div>
   )
 }
@@ -204,7 +194,7 @@ function AdvanceForm({
           <input type="date" className={inputClass} value={date} onChange={(e) => setDate(e.target.value)} />
         </Field>
         <Field label="المورد / المستفيد (اختياري)">
-          <input className={inputClass} list={SUPPLIER_LIST_ID} value={counterparty} onChange={(e) => setCounterparty(e.target.value)} />
+          <SupplierInput value={counterparty} onChange={setCounterparty} />
         </Field>
         {supplierAccount && (
           <p className="text-xs text-amber-700 -mt-2 mb-3">
@@ -348,7 +338,7 @@ function SingleExpenseForm({
           <input className={inputClass} value={description} onChange={(e) => setDescription(e.target.value)} />
         </Field>
         <Field label={isPartial ? 'اسم المورد' : 'المورد / المستفيد (اختياري)'}>
-          <input className={inputClass} list={SUPPLIER_LIST_ID} value={counterparty} onChange={(e) => setCounterparty(e.target.value)} />
+          <SupplierInput value={counterparty} onChange={setCounterparty} />
         </Field>
         <Field label="طريقة الدفع">
           <select className={inputClass} value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)}>
@@ -488,7 +478,7 @@ function SplitExpenseForm({
         </label>
 
         <Field label={isPartial ? 'اسم المورد' : 'المورد / المستفيد (اختياري)'}>
-          <input className={inputClass} list={SUPPLIER_LIST_ID} value={counterparty} onChange={(e) => setCounterparty(e.target.value)} />
+          <SupplierInput value={counterparty} onChange={setCounterparty} />
         </Field>
         <Field label="طريقة الدفع">
           <select className={inputClass} value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)}>

@@ -3,6 +3,7 @@ import { LedgerError, updateEntryDetails } from '../domain/ledger'
 import { formatEGP } from '../domain/money'
 import { PAYMENT_METHOD_LABELS, type LedgerEntry, type PaymentMethod } from '../domain/types'
 import { Banner, Button, Field, Modal, inputClass } from './ui'
+import { SupplierInput } from './SupplierInput'
 
 /** Corrects the details of a recorded entry that move no money. Which fields
  * are offered depends on what the entry is: a contribution has no supplier,
@@ -56,7 +57,7 @@ export function EditEntryModal({ entry, onClose, onSaved }: { entry: LedgerEntry
       </Field>
       {showCounterparty && (
         <Field label="المورد / المستفيد">
-          <input className={inputClass} value={counterparty} onChange={(e) => setCounterparty(e.target.value)} />
+          <SupplierInput value={counterparty} onChange={setCounterparty} />
         </Field>
       )}
       {showPayment && (
