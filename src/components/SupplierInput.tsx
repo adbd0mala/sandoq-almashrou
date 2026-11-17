@@ -29,6 +29,15 @@ export function SupplierInput({ value, onChange, maxLength = 80 }: { value: stri
     return () => document.removeEventListener('pointerdown', closeIfOutside)
   }, [open])
 
+  // On a phone the keyboard takes the lower half of the screen and the list
+  // opens under the field — move the field up so the list is in view. The
+  // short wait lets the keyboard finish opening (the browser scrolls then too).
+  useEffect(() => {
+    if (!open || !window.matchMedia('(pointer: coarse)').matches) return
+    const timer = setTimeout(() => root.current?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 300)
+    return () => clearTimeout(timer)
+  }, [open])
+
   const typed = supplierKey(value)
   const matches = searching && typed ? names.filter((n) => n.includes(typed)) : names
   const isNew = typed !== '' && !names.includes(typed)
@@ -37,7 +46,7 @@ export function SupplierInput({ value, onChange, maxLength = 80 }: { value: stri
   const keepFocus = (e: React.SyntheticEvent) => e.preventDefault()
 
   return (
-    <div ref={root} className="relative">
+    <div ref={root} className="relative scroll-mt-20">
       <input
         className={`${inputClass} pl-11`}
         role="combobox"
@@ -59,7 +68,7 @@ export function SupplierInput({ value, onChange, maxLength = 80 }: { value: stri
       <button
         type="button"
         aria-label="قائمة الموردين"
-        className="absolute left-0 inset-y-0 px-3.5 text-slate-500 text-lg"
+        className="absolute left-0 inset-y-0 px-3.5 text-slate-600 text-xl"
         onPointerDown={keepFocus}
         onMouseDown={keepFocus}
         onClick={() => {
@@ -67,7 +76,7 @@ export function SupplierInput({ value, onChange, maxLength = 80 }: { value: stri
           setOpen((v) => !v)
         }}
       >
-        ▾
+        {open ? '▴' : '▾'}
       </button>
       {open && (
         <ul

@@ -1,3 +1,4 @@
+import { execSync } from 'node:child_process'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { defineConfig } from 'vite'
@@ -8,14 +9,39 @@ import { VitePWA } from 'vite-plugin-pwa'
 // BASE_PATH="/" for local dev/preview at the root if ever needed.
 const base = process.env.BASE_PATH ?? '/sandoq-almashrou/'
 
+// Shown on the settings screen so "which version am I on?" has an answer:
+// when it was built (Cairo time) and from which commit.
+function appVersion(): string {
+  if (process.env.APP_VERSION_LABEL) return process.env.APP_VERSION_LABEL
+  let commit = process.env.GITHUB_SHA ?? ''
+  if (!commit) {
+    try {
+      commit = execSync('git rev-parse HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim()
+    } catch {
+      commit = 'local'
+    }
+  }
+  const builtAt = new Date().toLocaleString('en-GB', { timeZone: 'Africa/Cairo', dateStyle: 'short', timeStyle: 'short' })
+  return `${builtAt} · ${commit.slice(0, 7)}`
+}
+
 // https://vite.dev/config/
 export default defineConfig({
   base,
+  define: { __APP_VERSION__: JSON.stringify(appVersion()) },
   plugins: [
     react(),
     tailwindcss(),
     VitePWA({
-      registerType: 'autoUpdate',
+      // A new version downloads in the background and then WAITS: the one
+      // on screen keeps working from its own files until src/pwa.ts tells
+      // the new one to take over and reloads the page onto it. (Taking over
+      // behind an open page would pull its lazily-loaded parts — the Excel
+      // and PDF exporters — out from under it.)
+      registerType: 'prompt',
+      // Registered by src/pwa.ts, which also looks for a new version
+      // whenever the app comes back to the front.
+      injectRegister: false,
       includeAssets: ['favicon.svg'],
       manifest: {
         id: base,
@@ -39,6 +65,8 @@ export default defineConfig({
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
         navigateFallback: `${base}index.html`,
+        // First install only: work offline from the first visit, not the second.
+        clientsClaim: true,
       },
     }),
   ],

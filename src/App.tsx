@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Dashboard } from './pages/Dashboard'
 import { Funders } from './pages/Funders'
 import { FunderPayments } from './pages/FunderPayments'
@@ -8,6 +8,7 @@ import { RecordContribution } from './pages/RecordContribution'
 import { Reports, type ReportsTab } from './pages/Reports'
 import { BackupPage } from './pages/BackupPage'
 import { runDailyAutoBackupIfDue } from './backup/backup'
+import { applyAppUpdate, registerServiceWorker } from './pwa'
 
 type Tab = 'home' | 'expense' | 'contribution' | 'funders' | 'funderPayments' | 'categories' | 'reports' | 'backup'
 
@@ -26,6 +27,27 @@ export default function App() {
   const [paymentsFunderId, setPaymentsFunderId] = useState<string | undefined>(undefined)
   /** Set while the expense screen was opened to add an item to this supplier's account. */
   const [itemSupplier, setItemSupplier] = useState<string | undefined>(undefined)
+  const [updateReady, setUpdateReady] = useState(false)
+  const tabRef = useRef(tab)
+  useEffect(() => {
+    tabRef.current = tab
+  }, [tab])
+
+  useEffect(() => {
+    registerServiceWorker(() => {
+      // A newer version is downloaded and waiting. Switch to it straight
+      // away when nothing can be lost (app in the background, or on the
+      // home screen where nothing is being typed); anywhere else ask first,
+      // so a half-filled form isn't thrown away by the reload.
+      if (document.hidden || tabRef.current === 'home') applyAppUpdate()
+      else setUpdateReady(true)
+    })
+  }, [])
+
+  // Asked but not answered: take the update at the next safe moment anyway.
+  useEffect(() => {
+    if (updateReady && tab === 'home') applyAppUpdate()
+  }, [updateReady, tab])
 
   useEffect(() => {
     const tryBackup = () =>
@@ -66,6 +88,16 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 pb-20" dir="rtl">
+      {updateReady && (
+        <div className="sticky top-0 z-40 bg-teal-700 text-white">
+          <div className="max-w-md mx-auto px-4 py-2 flex items-center justify-between gap-3">
+            <span className="text-sm">فيه نسخة جديدة من التطبيق جاهزة</span>
+            <button className="bg-white text-teal-800 font-bold text-sm rounded-lg px-3 py-1.5 shrink-0" onClick={applyAppUpdate}>
+              تحديث الآن
+            </button>
+          </div>
+        </div>
+      )}
       <div className="max-w-md mx-auto px-4 pt-5">
         {tab === 'home' && (
           <Dashboard

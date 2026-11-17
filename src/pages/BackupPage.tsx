@@ -13,6 +13,7 @@ import {
   restoreFromSnapshotId,
 } from '../backup/backup'
 import { Banner, Button, Card, EmptyState, Field, PageTitle } from '../components/ui'
+import { checkForAppUpdate, type UpdateCheck } from '../pwa'
 
 export function BackupPage() {
   const settings = useLiveQuery(ensureSettings, [])
@@ -119,6 +120,8 @@ export function BackupPage() {
         )}
       </Card>
 
+      <AppVersionCard />
+
       {settings && (
         <Card>
           <h3 className="font-bold text-slate-700 mb-2">إعدادات</h3>
@@ -136,5 +139,39 @@ export function BackupPage() {
         </Card>
       )}
     </div>
+  )
+}
+
+const UPDATE_MESSAGES: Record<UpdateCheck, string> = {
+  downloading: 'فيه نسخة جديدة بتتحمّل دلوقتي. أول ما تخلص هيظهرلك زرار «تحديث الآن» فوق.',
+  ready: 'فيه نسخة جديدة جاهزة. دوس «تحديث الآن» فوق.',
+  latest: 'إنت على آخر نسخة.',
+  offline: 'مفيش اتصال بالإنترنت دلوقتي. التطبيق شغال عادي، وجرّب التحديث لما النت يرجع.',
+  unsupported: 'التحديث التلقائي مش متاح في المتصفح ده. اقفل الصفحة وافتحها تاني عشان تاخد آخر نسخة.',
+}
+
+/** Which build is running, and a way to ask for a newer one right now. */
+function AppVersionCard() {
+  const [message, setMessage] = useState('')
+  const [checking, setChecking] = useState(false)
+
+  async function check() {
+    setChecking(true)
+    setMessage('')
+    setMessage(UPDATE_MESSAGES[await checkForAppUpdate()])
+    setChecking(false)
+  }
+
+  return (
+    <Card>
+      <h3 className="font-bold text-slate-700 mb-2">إصدار التطبيق</h3>
+      <p className="text-sm text-slate-600 mb-3" dir="ltr" style={{ textAlign: 'right' }}>
+        {__APP_VERSION__}
+      </p>
+      {message && <p className="text-sm text-teal-800 mb-3">{message}</p>}
+      <Button variant="secondary" className="w-full" onClick={check} disabled={checking}>
+        {checking ? 'جاري التحقق...' : 'التحقق من وجود تحديث'}
+      </Button>
+    </Card>
   )
 }
