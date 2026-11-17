@@ -31,7 +31,7 @@ export function Button({
   const styles: Record<string, string> = {
     primary: 'bg-teal-700 text-white active:bg-teal-800 disabled:bg-slate-300',
     secondary: 'bg-slate-100 text-slate-700 active:bg-slate-200',
-    danger: 'bg-red-600 text-white active:bg-red-700',
+    danger: 'bg-red-600 text-white active:bg-red-700 disabled:bg-slate-300',
     ghost: 'bg-transparent text-teal-700',
   }
   return (

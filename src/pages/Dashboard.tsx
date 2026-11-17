@@ -39,14 +39,18 @@ export function Dashboard({
         </button>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 text-center">
-        <button onClick={() => onNavigate('funders')} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 active:bg-slate-50">
+      <div className="grid grid-cols-3 gap-2 text-center">
+        <button onClick={() => onNavigate('funders')} className="bg-white rounded-2xl shadow-sm border border-slate-200 px-2 py-3 active:bg-slate-50">
           <div className="text-2xl font-bold text-slate-800">{summary.funderCount}</div>
           <div className="text-xs text-teal-700 font-semibold mt-1">ممولون نشطون ‹</div>
         </button>
-        <button onClick={() => onNavigate('categories')} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 active:bg-slate-50">
+        <button onClick={() => onNavigate('categories')} className="bg-white rounded-2xl shadow-sm border border-slate-200 px-2 py-3 active:bg-slate-50">
           <div className="text-2xl font-bold text-slate-800">{summary.categoryCount}</div>
-          <div className="text-xs text-teal-700 font-semibold mt-1">بند مصروفات نشط ‹</div>
+          <div className="text-xs text-teal-700 font-semibold mt-1">بنود نشطة ‹</div>
+        </button>
+        <button onClick={() => onNavigate('suppliers')} className="bg-white rounded-2xl shadow-sm border border-slate-200 px-2 py-3 active:bg-slate-50">
+          <div className="text-2xl font-bold text-slate-800">{summary.supplierCount}</div>
+          <div className="text-xs text-teal-700 font-semibold mt-1">موردون نشطون ‹</div>
         </button>
       </div>
 

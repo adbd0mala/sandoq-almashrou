@@ -48,10 +48,12 @@ export function Reports({
   initialCategoryId,
   initialTab,
   onAddItemForSupplier,
+  onOpenSuppliers,
 }: {
   initialCategoryId?: string
   initialTab?: ReportsTab
   onAddItemForSupplier: (supplierName: string) => void
+  onOpenSuppliers: () => void
 }) {
   const [tab, setTab] = useState<ReportsTab>(initialTab ?? (initialCategoryId ? 'category' : 'full'))
   // Reports show what stands today. Cancelled entries (with the reversals
@@ -89,7 +91,12 @@ export function Reports({
       {tab === 'funder' && <FunderReport showHistory={showHistory} />}
       {tab === 'category' && <CategoryReport initialCategoryId={initialCategoryId} showHistory={showHistory} />}
       {tab === 'payables' && (
-        <PayablesReport showHistory={showHistory} onOpenItems={() => setTab('items')} onAddItemForSupplier={onAddItemForSupplier} />
+        <PayablesReport
+          showHistory={showHistory}
+          onOpenItems={() => setTab('items')}
+          onAddItemForSupplier={onAddItemForSupplier}
+          onOpenSuppliers={onOpenSuppliers}
+        />
       )}
       {tab === 'items' && <ItemsReport showHistory={showHistory} />}
     </div>
@@ -522,10 +529,12 @@ function PayablesReport({
   showHistory,
   onOpenItems,
   onAddItemForSupplier,
+  onOpenSuppliers,
 }: {
   showHistory: boolean
   onOpenItems: () => void
   onAddItemForSupplier: (supplierName: string) => void
+  onOpenSuppliers: () => void
 }) {
   const payables = useLiveQuery(listAllPayables, [])
   const items = useLiveQuery(listAdvanceItems, [])
@@ -617,6 +626,9 @@ function PayablesReport({
 
   return (
     <div className="space-y-3">
+      <button className="block text-sm text-teal-700 font-semibold" onClick={onOpenSuppliers}>
+        إدارة أسماء الموردين ‹
+      </button>
       {open.length === 0 && owedItems.length === 0 ? (
         <Card>
           <EmptyState>

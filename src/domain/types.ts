@@ -125,11 +125,24 @@ export interface ExpenseAllocation {
   amountQirsh: number
 }
 
+/** What the user has said about a supplier beyond using its name on
+ * purchases: that it exists before anything was bought from it, or that it
+ * is dormant. A supplier with no record here is simply a name in use, and
+ * active. Kept on the settings row, so backups carry it with no new table. */
+export interface SupplierRecord {
+  /** Normalized (see supplierKey): the same text purchases carry. */
+  name: string
+  /** false = dormant: left out of the supplier list offered when recording. */
+  active: boolean
+  createdAt: string
+}
+
 export interface Settings {
   id: 'singleton'
   projectName: string
   allowOverdraft: boolean
   lastAutoBackupAt?: string
+  suppliers?: SupplierRecord[]
 }
 
 export interface BackupSnapshot {

@@ -8,6 +8,7 @@ import type {
   LedgerEntry,
   Payable,
   PaymentMethod,
+  SupplierRecord,
 } from './types'
 import { formatEGP, formatUnits, splitProportionally } from './money'
 
@@ -1384,16 +1385,134 @@ export async function paySupplier(input: PaySupplierInput): Promise<LedgerEntry[
   )
 }
 
-/** Supplier names already used, most recent first — offered when typing a
- * supplier so a new purchase lands on the same account, not a near-copy. */
-export async function listSupplierNames(): Promise<string[]> {
-  const entries = (await db.ledger.toArray()).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-  const names = new Set<string>()
+// --- The supplier list -----------------------------------------------------
+// A supplier is the name written on purchases; the list is those names plus
+// whatever the user recorded about them (SupplierRecord): one added before
+// buying anything, or one marked dormant. Renaming a supplier rewrites the
+// name on everything bought from it, so it stays one account.
+
+export interface SupplierInfo {
+  name: string
+  active: boolean
+  /** Standing (not cancelled) movements written under this name. */
+  movements: number
+  /** Still owed on the supplier's account. */
+  remainingQirsh: number
+  /** When the name was last used; if never, when it was added. */
+  lastUsedAt: string
+}
+
+const usesSupplier = (e: LedgerEntry) => e.type !== 'CONTRIBUTION' && !e.reversalOfId && !e.reversed
+
+// A plain read (not ensureSettings, which may write): this runs inside live queries.
+async function supplierRecords(): Promise<SupplierRecord[]> {
+  return (await db.settings.get('singleton'))?.suppliers ?? []
+}
+
+/** Every supplier: active first, then most recently used first. */
+export async function listSuppliers(): Promise<SupplierInfo[]> {
+  const [entries, records, accounts] = await Promise.all([db.ledger.toArray(), supplierRecords(), listSupplierAccounts()])
+  const suppliers = new Map<string, SupplierInfo & { addedAt: string }>()
+  for (const r of records) {
+    suppliers.set(r.name, { name: r.name, active: r.active, movements: 0, remainingQirsh: 0, lastUsedAt: '', addedAt: r.createdAt })
+  }
   for (const e of entries) {
     const key = supplierKey(e.counterparty)
-    if (key && e.type !== 'CONTRIBUTION' && !e.reversalOfId) names.add(key)
+    if (!key || !usesSupplier(e)) continue
+    const s = suppliers.get(key) ?? { name: key, active: true, movements: 0, remainingQirsh: 0, lastUsedAt: '', addedAt: e.createdAt }
+    s.movements += 1
+    if (e.createdAt > s.lastUsedAt) s.lastUsedAt = e.createdAt
+    suppliers.set(key, s)
   }
-  return [...names]
+  for (const a of accounts) {
+    const s = suppliers.get(a.name)
+    if (s) s.remainingQirsh = a.remainingQirsh
+  }
+  return [...suppliers.values()]
+    .map(({ addedAt, ...s }) => ({ ...s, lastUsedAt: s.lastUsedAt || addedAt }))
+    .sort((a, b) => Number(b.active) - Number(a.active) || b.lastUsedAt.localeCompare(a.lastUsedAt))
+}
+
+const SUPPLIER_TABLES = () => [db.settings, db.ledger, db.payables, db.payableSettlements, db.advanceShares]
+
+async function saveSupplierRecords(records: SupplierRecord[]): Promise<void> {
+  await ensureSettings()
+  await db.settings.update('singleton', { suppliers: records.length > 0 ? records : undefined })
+}
+
+/** Adds a supplier before anything is bought from them, so the name is
+ * there to pick when the first purchase is recorded. */
+export async function addSupplier(name: string): Promise<void> {
+  const key = supplierKey(name)
+  if (!key) throw new LedgerError('اسم المورد مطلوب')
+  await db.transaction('rw', SUPPLIER_TABLES(), async () => {
+    if ((await listSuppliers()).some((s) => s.name === key)) throw new LedgerError('فيه مورد بالاسم ده بالفعل')
+    await saveSupplierRecords([...(await supplierRecords()), { name: key, active: true, createdAt: new Date().toISOString() }])
+  })
+}
+
+/** Dormant suppliers are left out of the list offered when recording a
+ * purchase. Their account, purchases and anything owed are untouched. */
+export async function setSupplierActive(name: string, active: boolean): Promise<void> {
+  const key = supplierKey(name)
+  await db.transaction('rw', SUPPLIER_TABLES(), async () => {
+    const supplier = (await listSuppliers()).find((s) => s.name === key)
+    if (!supplier) throw new LedgerError('المورد غير موجود')
+    const records = await supplierRecords()
+    const existing = records.find((r) => r.name === key)
+    await saveSupplierRecords(
+      existing
+        ? records.map((r) => (r.name === key ? { ...r, active } : r))
+        : [...records, { name: key, active, createdAt: new Date().toISOString() }],
+    )
+  })
+}
+
+/** Renames a supplier on everything written under the old name — every
+ * movement (cancelled ones too: this renames the supplier, it doesn't edit
+ * a movement), payable, and the wording of payments made against them.
+ * Renaming onto a name that already exists merges the two accounts. */
+export async function renameSupplier(oldName: string, newName: string): Promise<void> {
+  const from = supplierKey(oldName)
+  const to = supplierKey(newName)
+  if (!to) throw new LedgerError('اسم المورد مطلوب')
+  if (from === to) return
+
+  await db.transaction('rw', SUPPLIER_TABLES(), async () => {
+    const suppliers = await listSuppliers()
+    if (!suppliers.some((s) => s.name === from)) throw new LedgerError('المورد غير موجود')
+    const merging = suppliers.some((s) => s.name === to)
+
+    // Payables first: relabelPayable also rewords the payments made against them.
+    for (const payable of await db.payables.toArray()) {
+      if (supplierKey(payable.supplierName) !== from) continue
+      await relabelPayable(payable, { supplierName: to, description: payable.description, date: payable.date, totalQirsh: payable.totalQirsh })
+    }
+    for (const entry of await db.ledger.toArray()) {
+      if (supplierKey(entry.counterparty) === from) await db.ledger.update(entry.id, { counterparty: to })
+    }
+
+    // The old name's record moves to the new name; merged into an existing
+    // supplier, that supplier's own status stands.
+    const records = await supplierRecords()
+    const moved = records.find((r) => r.name === from)
+    const rest = records.filter((r) => r.name !== from)
+    await saveSupplierRecords(moved && !merging ? [...rest, { ...moved, name: to }] : rest)
+  })
+}
+
+/** Removes a supplier that nothing was bought from. One with movements
+ * can't go — its name is on them — but it can be made dormant. */
+export async function deleteSupplier(name: string): Promise<void> {
+  const key = supplierKey(name)
+  await db.transaction('rw', SUPPLIER_TABLES(), async () => {
+    const supplier = (await listSuppliers()).find((s) => s.name === key)
+    if (!supplier) return
+    if (supplier.movements > 0) {
+      throw new LedgerError('المورد ده عليه حركات مسجلة، فمينفعش يتحذف. خلّيه خامل عشان يختفي من قائمة الموردين')
+    }
+    await saveSupplierRecords((await supplierRecords()).filter((r) => r.name !== key))
+  })
 }
 
 export interface AdjustAdvanceItemInput {
@@ -1626,18 +1745,20 @@ export interface DashboardSummary {
   totalUnallocatedAdvancesQirsh: number
   funderCount: number
   categoryCount: number
+  supplierCount: number
   recentEntries: LedgerEntry[]
   topCategories: { category: ExpenseCategory; spentQirsh: number }[]
 }
 
 export async function getDashboardSummary(): Promise<DashboardSummary> {
-  const [entries, funders, categories, openPayables, items, spentByCategory] = await Promise.all([
+  const [entries, funders, categories, openPayables, items, spentByCategory, suppliers] = await Promise.all([
     db.ledger.toArray(),
     db.funders.toArray(),
     db.categories.toArray(),
     listOpenPayables(),
     listAdvanceItems(),
     getSpentByCategory(),
+    listSuppliers(),
   ])
   const totalPayablesQirsh =
     openPayables.reduce((s, p) => s + p.remainingQirsh, 0) + items.reduce((s, i) => s + Math.max(0, i.owedQirsh ?? 0), 0)
@@ -1671,6 +1792,7 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
     totalUnallocatedAdvancesQirsh,
     funderCount: funders.filter((f) => f.active).length,
     categoryCount: categories.filter((c) => c.active).length,
+    supplierCount: suppliers.filter((s) => s.active).length,
     recentEntries,
     topCategories,
   }

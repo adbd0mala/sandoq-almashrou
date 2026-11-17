@@ -1,17 +1,18 @@
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useEffect, useRef, useState } from 'react'
-import { listSupplierAccounts, listSupplierNames, supplierKey } from '../domain/ledger'
+import { listSuppliers, supplierKey } from '../domain/ledger'
 import { formatEGP } from '../domain/money'
 import { inputClass } from './ui'
 
 /** Supplier field as a searchable drop-down: the arrow opens the list of
- * suppliers already used (most recent first, with what is owed to each),
+ * active suppliers (most recently used first, with what is owed to each),
  * typing in the box searches it, and tapping a name fills it in exactly as
- * it was written before — which is what puts a new purchase on the same
- * supplier account. A name that isn't in the list is simply a new supplier. */
+ * it is written elsewhere — which is what puts a new purchase on the same
+ * supplier account. A name that isn't in the list is simply a new supplier;
+ * dormant suppliers are kept out of the list but can still be typed. */
 export function SupplierInput({ value, onChange, maxLength = 80 }: { value: string; onChange: (name: string) => void; maxLength?: number }) {
-  const names = useLiveQuery(listSupplierNames, []) ?? []
-  const accounts = useLiveQuery(listSupplierAccounts, []) ?? []
+  const suppliers = useLiveQuery(listSuppliers, []) ?? []
+  const names = suppliers.filter((s) => s.active).map((s) => s.name)
   const [open, setOpen] = useState(false)
   // The box holds a name already when the list opens; only what is typed
   // after that is a search, so opening it always shows every supplier.
@@ -40,8 +41,9 @@ export function SupplierInput({ value, onChange, maxLength = 80 }: { value: stri
 
   const typed = supplierKey(value)
   const matches = searching && typed ? names.filter((n) => n.includes(typed)) : names
-  const isNew = typed !== '' && !names.includes(typed)
-  const owed = new Map(accounts.map((a) => [a.name, a.remainingQirsh]))
+  const known = suppliers.find((s) => s.name === typed)
+  const isNew = typed !== '' && !known
+  const owed = new Map(suppliers.map((s) => [s.name, s.remainingQirsh]))
   // Keeps the box's focus (and the keyboard) where it is while the list is used.
   const keepFocus = (e: React.SyntheticEvent) => e.preventDefault()
 
@@ -107,6 +109,9 @@ export function SupplierInput({ value, onChange, maxLength = 80 }: { value: stri
             </li>
           )}
           {isNew && <li className="px-3 py-2.5 text-xs text-teal-700">هيتسجل كمورد جديد: «{typed}»</li>}
+          {known && !known.active && (
+            <li className="px-3 py-2.5 text-xs text-amber-700">«{typed}» مورد خامل، فمش ظاهر في القائمة. هيتسجل عليه عادي.</li>
+          )}
         </ul>
       )}
     </div>

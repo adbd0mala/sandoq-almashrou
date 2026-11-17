@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Dashboard } from './pages/Dashboard'
 import { Funders } from './pages/Funders'
 import { FunderPayments } from './pages/FunderPayments'
+import { Suppliers } from './pages/Suppliers'
 import { Categories } from './pages/Categories'
 import { RecordExpense } from './pages/RecordExpense'
 import { RecordContribution } from './pages/RecordContribution'
@@ -10,7 +11,7 @@ import { BackupPage } from './pages/BackupPage'
 import { runDailyAutoBackupIfDue } from './backup/backup'
 import { applyAppUpdate, registerServiceWorker } from './pwa'
 
-type Tab = 'home' | 'expense' | 'contribution' | 'funders' | 'funderPayments' | 'categories' | 'reports' | 'backup'
+type Tab = 'home' | 'expense' | 'contribution' | 'funders' | 'funderPayments' | 'categories' | 'suppliers' | 'reports' | 'backup'
 
 const NAV: { tab: Tab; label: string; icon: string }[] = [
   { tab: 'home', label: 'الرئيسية', icon: '🏠' },
@@ -27,6 +28,8 @@ export default function App() {
   const [paymentsFunderId, setPaymentsFunderId] = useState<string | undefined>(undefined)
   /** Set while the expense screen was opened to add an item to this supplier's account. */
   const [itemSupplier, setItemSupplier] = useState<string | undefined>(undefined)
+  /** Where "back" on the suppliers screen returns to. */
+  const [suppliersFrom, setSuppliersFrom] = useState<'home' | 'payables'>('home')
   const [updateReady, setUpdateReady] = useState(false)
   const tabRef = useRef(tab)
   useEffect(() => {
@@ -75,6 +78,11 @@ export default function App() {
     setTab('funderPayments')
   }
 
+  function openSuppliers(from: 'home' | 'payables') {
+    setSuppliersFrom(from)
+    setTab('suppliers')
+  }
+
   function openItemForSupplier(supplierName: string) {
     setItemSupplier(supplierName)
     setTab('expense')
@@ -103,7 +111,8 @@ export default function App() {
           <Dashboard
             onNavigate={(t) => {
               setItemSupplier(undefined)
-              setTab(t as Tab)
+              if (t === 'suppliers') openSuppliers('home')
+              else setTab(t as Tab)
             }}
             onOpenReport={openReport}
           />
@@ -119,7 +128,15 @@ export default function App() {
         {tab === 'funders' && <Funders onOpenPayments={openFunderPayments} />}
         {tab === 'funderPayments' && <FunderPayments focusFunderId={paymentsFunderId} onBack={() => setTab('funders')} />}
         {tab === 'categories' && <Categories onOpenStatement={openCategoryStatement} />}
-        {tab === 'reports' && <Reports initialCategoryId={reportCategoryId} initialTab={reportsTab} onAddItemForSupplier={openItemForSupplier} />}
+        {tab === 'suppliers' && <Suppliers onBack={() => (suppliersFrom === 'payables' ? openReport('payables') : setTab('home'))} />}
+        {tab === 'reports' && (
+          <Reports
+            initialCategoryId={reportCategoryId}
+            initialTab={reportsTab}
+            onAddItemForSupplier={openItemForSupplier}
+            onOpenSuppliers={() => openSuppliers('payables')}
+          />
+        )}
         {tab === 'backup' && <BackupPage />}
       </div>
 
