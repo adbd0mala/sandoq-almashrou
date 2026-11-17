@@ -12,13 +12,19 @@ import {
   listAllPayables,
   listCategories,
   listFunders,
+  listSupplierAccounts,
+  paySupplier,
   reverseEntry,
   settlePayable,
   signedAmount,
+  splitSupplierPayment,
+  supplierKey,
   updatePayable,
+  type AdvanceStatus,
   type CategoryStatement,
   type FunderStatement,
   type PayableStatus,
+  type SupplierAccount,
 } from '../domain/ledger'
 import { egpToQirsh, formatEGP, formatUnits } from '../domain/money'
 import { Banner, Button, Card, EmptyState, Field, Modal, PageTitle, inputClass } from '../components/ui'
@@ -37,7 +43,15 @@ const isCancelledPair = (e: LedgerEntry) => e.reversed === true || !!e.reversalO
 const loadExcel = () => import('../export/excel')
 const loadPdf = () => import('../export/pdf')
 
-export function Reports({ initialCategoryId, initialTab }: { initialCategoryId?: string; initialTab?: ReportsTab }) {
+export function Reports({
+  initialCategoryId,
+  initialTab,
+  onAddItemForSupplier,
+}: {
+  initialCategoryId?: string
+  initialTab?: ReportsTab
+  onAddItemForSupplier: (supplierName: string) => void
+}) {
   const [tab, setTab] = useState<ReportsTab>(initialTab ?? (initialCategoryId ? 'category' : 'full'))
   // Reports show what stands today. Cancelled entries (with the reversals
   // that cancelled them), cancelled invoices and items, and the "edited"
@@ -73,7 +87,9 @@ export function Reports({ initialCategoryId, initialTab }: { initialCategoryId?:
       {tab === 'full' && <FullProjectReport showHistory={showHistory} />}
       {tab === 'funder' && <FunderReport showHistory={showHistory} />}
       {tab === 'category' && <CategoryReport initialCategoryId={initialCategoryId} showHistory={showHistory} />}
-      {tab === 'payables' && <PayablesReport showHistory={showHistory} onOpenItems={() => setTab('items')} />}
+      {tab === 'payables' && (
+        <PayablesReport showHistory={showHistory} onOpenItems={() => setTab('items')} onAddItemForSupplier={onAddItemForSupplier} />
+      )}
       {tab === 'items' && <ItemsReport showHistory={showHistory} />}
     </div>
   )
@@ -497,14 +513,28 @@ function CategoryReport({ initialCategoryId, showHistory }: { initialCategoryId?
   )
 }
 
-function PayablesReport({ showHistory, onOpenItems }: { showHistory: boolean; onOpenItems: () => void }) {
+/** What is owed to suppliers, one account per supplier: everything bought
+ * from them that isn't paid off (invoices and items alike) under one
+ * balance, with one payment against the lot and a way to put a new item on
+ * the same account. */
+function PayablesReport({
+  showHistory,
+  onOpenItems,
+  onAddItemForSupplier,
+}: {
+  showHistory: boolean
+  onOpenItems: () => void
+  onAddItemForSupplier: (supplierName: string) => void
+}) {
   const payables = useLiveQuery(listAllPayables, [])
   const items = useLiveQuery(listAdvanceItems, [])
+  const accounts = useLiveQuery(listSupplierAccounts, [])
   const [settlingId, setSettlingId] = useState<string | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [payingSupplier, setPayingSupplier] = useState<string | null>(null)
   const [showClosed, setShowClosed] = useState(false)
 
-  if (!payables || !items) return null
+  if (!payables || !items || !accounts) return null
 
   const open = payables.filter((p) => p.remainingQirsh > 0).sort((a, b) => a.payable.date.localeCompare(b.payable.date))
   // A cancelled invoice is history, except one that still has settlement
@@ -514,6 +544,30 @@ function PayablesReport({ showHistory, onOpenItems }: { showHistory: boolean; on
   const owedItems = items.filter((i) => (i.owedQirsh ?? 0) > 0)
   const settling = payables.find((p) => p.payable.id === settlingId)
   const editing = payables.find((p) => p.payable.id === editingId)
+  const owedAccounts = accounts.filter((a) => a.remainingQirsh > 0)
+  const paying = accounts.find((a) => a.name === payingSupplier)
+  // An owed item recorded without a supplier's name belongs to no account.
+  const unnamedItems = owedItems.filter((i) => !supplierKey(i.advance.counterparty))
+
+  const itemCard = (i: AdvanceStatus) => (
+    <Card key={i.advance.id}>
+      <div className="flex justify-between items-start gap-2">
+        <div className="min-w-0">
+          <div className="font-semibold text-slate-800 break-words">{i.advance.counterparty || i.advance.description}</div>
+          <div className="text-xs text-slate-400">
+            صنف: {i.advance.description} · {i.advance.date}
+          </div>
+        </div>
+        <span className="text-amber-700 font-bold tabular-nums shrink-0">{formatEGP(i.owedQirsh ?? 0)}</span>
+      </div>
+      <div className="text-xs text-slate-500 mt-2">
+        إجمالي الحساب: {formatEGP(i.agreedTotalQirsh ?? 0)} · المدفوع: {formatEGP(i.totalPaidQirsh)}
+      </div>
+      <Button variant="secondary" className="w-full mt-3" onClick={onOpenItems}>
+        سداد من «الأصناف والدفعات»
+      </Button>
+    </Card>
+  )
 
   const totalRemaining = open.reduce((s, p) => s + p.remainingQirsh, 0) + owedItems.reduce((s, i) => s + (i.owedQirsh ?? 0), 0)
 
@@ -575,27 +629,43 @@ function PayablesReport({ showHistory, onOpenItems }: { showHistory: boolean; on
         </Card>
       )}
 
-      {open.map(payableCard)}
-
-      {owedItems.map((i) => (
-        <Card key={i.advance.id}>
-          <div className="flex justify-between items-start gap-2">
-            <div className="min-w-0">
-              <div className="font-semibold text-slate-800 break-words">{i.advance.counterparty || i.advance.description}</div>
-              <div className="text-xs text-slate-400">
-                صنف: {i.advance.description} · {i.advance.date}
+      {owedAccounts.map((a) => {
+        const unpriced = a.lines.filter((l) => l.totalQirsh === null).length
+        return (
+          <div key={a.name} className="space-y-2">
+            <Card className="border-amber-300">
+              <div className="flex justify-between items-start gap-2">
+                <div className="min-w-0">
+                  <div className="text-xs text-slate-500">حساب المورد</div>
+                  <div className="font-bold text-slate-800 break-words">{a.name}</div>
+                </div>
+                <div className="shrink-0 text-left">
+                  <div className="text-xs text-slate-500">الباقي عليه</div>
+                  <div className="text-amber-700 font-bold tabular-nums">{formatEGP(a.remainingQirsh)}</div>
+                </div>
               </div>
+              <div className="text-xs text-slate-500 mt-2">
+                إجمالي مشترياته: {formatEGP(a.totalQirsh)} · المدفوع منها: {formatEGP(a.paidQirsh)}
+                {unpriced > 0 && ` · غير ${formatUnits(unpriced)} صنف حسابه لسه مش محدد`}
+              </div>
+              <div className="flex gap-2 mt-3">
+                <Button className="flex-1" onClick={() => setPayingSupplier(a.name)}>
+                  دفعة للمورد
+                </Button>
+                <Button variant="secondary" className="flex-1" onClick={() => onAddItemForSupplier(a.name)}>
+                  صنف جديد على حسابه
+                </Button>
+              </div>
+            </Card>
+            <div className="space-y-2 mr-3">
+              {open.filter((p) => supplierKey(p.payable.supplierName) === a.name).map(payableCard)}
+              {owedItems.filter((i) => supplierKey(i.advance.counterparty) === a.name).map(itemCard)}
             </div>
-            <span className="text-amber-700 font-bold tabular-nums shrink-0">{formatEGP(i.owedQirsh ?? 0)}</span>
           </div>
-          <div className="text-xs text-slate-500 mt-2">
-            إجمالي الحساب: {formatEGP(i.agreedTotalQirsh ?? 0)} · المدفوع: {formatEGP(i.totalPaidQirsh)}
-          </div>
-          <Button variant="secondary" className="w-full mt-3" onClick={onOpenItems}>
-            سداد من «الأصناف والدفعات»
-          </Button>
-        </Card>
-      ))}
+        )
+      })}
+
+      {unnamedItems.map(itemCard)}
 
       {closed.length > 0 && (
         <>
@@ -609,7 +679,88 @@ function PayablesReport({ showHistory, onOpenItems }: { showHistory: boolean; on
 
       {settling && <SettlePayableModal key={settling.payable.id} status={settling} onClose={() => setSettlingId(null)} />}
       {editing && <EditPayableModal key={editing.payable.id} status={editing} onClose={() => setEditingId(null)} />}
+      {paying && <PaySupplierModal key={paying.name} account={paying} onClose={() => setPayingSupplier(null)} />}
     </div>
+  )
+}
+
+/** One payment to a supplier against their whole account. Shows how it will
+ * be spread over what is owed (oldest purchase first) before it's recorded. */
+function PaySupplierModal({ account, onClose }: { account: SupplierAccount; onClose: () => void }) {
+  const [amount, setAmount] = useState('')
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10))
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('CASH')
+  const [invoiceNumber, setInvoiceNumber] = useState('')
+  const [error, setError] = useState('')
+
+  const amountQirsh = Number(amount) > 0 ? egpToQirsh(Number(amount)) : 0
+  const tooMuch = amountQirsh > account.remainingQirsh
+  const parts = amountQirsh > 0 && !tooMuch ? splitSupplierPayment(account, amountQirsh) : []
+
+  async function submit() {
+    setError('')
+    try {
+      await paySupplier({ supplierName: account.name, amountQirsh, date, paymentMethod, invoiceNumber })
+      onClose()
+    } catch (e) {
+      setError(e instanceof LedgerError ? e.message : 'حدث خطأ غير متوقع')
+    }
+  }
+
+  return (
+    <Modal open onClose={onClose} title={`دفعة للمورد: ${account.name}`}>
+      {error && <Banner kind="error">{error}</Banner>}
+      <div className="flex justify-between items-center text-sm mb-3">
+        <span className="text-slate-600">
+          الباقي على المورد: <span className="font-bold text-amber-700">{formatEGP(account.remainingQirsh)}</span>
+        </span>
+        <button className="text-teal-700 text-xs font-semibold" onClick={() => setAmount(String(account.remainingQirsh / 100))}>
+          كل الباقي
+        </button>
+      </div>
+      <Field label="قيمة الدفعة (ج.م)">
+        <input type="number" inputMode="decimal" className={inputClass} value={amount} onChange={(e) => setAmount(e.target.value)} />
+      </Field>
+      {tooMuch && <p className="text-xs text-red-600 -mt-2 mb-3">القيمة أكبر من الباقي على المورد ({formatEGP(account.remainingQirsh)})</p>}
+      {parts.length > 0 && (
+        <div className="bg-slate-50 rounded-lg p-2 mb-3 text-xs">
+          <div className="text-slate-500 mb-1">الدفعة هتتسجل على مشترياته بالترتيب، الأقدم أولًا:</div>
+          <ul className="space-y-0.5">
+            {parts.map((p) => (
+              <li key={p.line.id} className="flex justify-between gap-2">
+                <span className="text-slate-700 min-w-0 break-words">
+                  {p.line.title} · {p.line.date}
+                </span>
+                <span className="font-semibold tabular-nums shrink-0">{formatEGP(p.amountQirsh)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <Field label="التاريخ">
+        <input type="date" className={inputClass} value={date} onChange={(e) => setDate(e.target.value)} />
+      </Field>
+      <Field label="طريقة الدفع">
+        <select className={inputClass} value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)}>
+          {Object.entries(PAYMENT_METHOD_LABELS).map(([k, v]) => (
+            <option key={k} value={k}>
+              {v}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <Field label="رقم الفاتورة (اختياري)">
+        <input className={inputClass} value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} />
+      </Field>
+      <div className="flex gap-2">
+        <Button className="flex-1" onClick={submit} disabled={amountQirsh <= 0 || tooMuch || !date}>
+          تسجيل دفعة المورد
+        </Button>
+        <Button variant="secondary" onClick={onClose}>
+          رجوع
+        </Button>
+      </div>
+    </Modal>
   )
 }
 

@@ -24,6 +24,8 @@ export default function App() {
   const [reportCategoryId, setReportCategoryId] = useState<string | undefined>(undefined)
   const [reportsTab, setReportsTab] = useState<ReportsTab | undefined>(undefined)
   const [paymentsFunderId, setPaymentsFunderId] = useState<string | undefined>(undefined)
+  /** Set while the expense screen was opened to add an item to this supplier's account. */
+  const [itemSupplier, setItemSupplier] = useState<string | undefined>(undefined)
 
   useEffect(() => {
     const tryBackup = () =>
@@ -51,6 +53,11 @@ export default function App() {
     setTab('funderPayments')
   }
 
+  function openItemForSupplier(supplierName: string) {
+    setItemSupplier(supplierName)
+    setTab('expense')
+  }
+
   function openReport(reportTab: ReportsTab) {
     setReportCategoryId(undefined)
     setReportsTab(reportTab)
@@ -60,13 +67,27 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-50 pb-20" dir="rtl">
       <div className="max-w-md mx-auto px-4 pt-5">
-        {tab === 'home' && <Dashboard onNavigate={(t) => setTab(t as Tab)} onOpenReport={openReport} />}
-        {tab === 'expense' && <RecordExpense onDone={() => setTab('home')} />}
+        {tab === 'home' && (
+          <Dashboard
+            onNavigate={(t) => {
+              setItemSupplier(undefined)
+              setTab(t as Tab)
+            }}
+            onOpenReport={openReport}
+          />
+        )}
+        {tab === 'expense' && (
+          <RecordExpense
+            key={itemSupplier ?? ''}
+            initialSupplier={itemSupplier}
+            onDone={() => (itemSupplier ? openReport('payables') : setTab('home'))}
+          />
+        )}
         {tab === 'contribution' && <RecordContribution onDone={() => setTab('home')} />}
         {tab === 'funders' && <Funders onOpenPayments={openFunderPayments} />}
         {tab === 'funderPayments' && <FunderPayments focusFunderId={paymentsFunderId} onBack={() => setTab('funders')} />}
         {tab === 'categories' && <Categories onOpenStatement={openCategoryStatement} />}
-        {tab === 'reports' && <Reports initialCategoryId={reportCategoryId} initialTab={reportsTab} />}
+        {tab === 'reports' && <Reports initialCategoryId={reportCategoryId} initialTab={reportsTab} onAddItemForSupplier={openItemForSupplier} />}
         {tab === 'backup' && <BackupPage />}
       </div>
 

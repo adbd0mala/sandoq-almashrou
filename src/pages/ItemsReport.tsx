@@ -284,7 +284,11 @@ function ItemCard({
               <div className="flex justify-between gap-2">
                 <span className={p.reversed ? 'text-slate-400 line-through' : 'text-slate-700'}>
                   {p.date}
-                  {p.paymentMethod ? ` · ${PAYMENT_METHOD_LABELS[p.paymentMethod]}` : ''}
+                  {p.amountQirsh === 0
+                    ? ' · اتسجل على حساب المورد من غير دفع'
+                    : p.paymentMethod
+                      ? ` · ${PAYMENT_METHOD_LABELS[p.paymentMethod]}`
+                      : ''}
                   {p.invoiceNumber ? ` · فاتورة ${p.invoiceNumber}` : ''}
                 </span>
                 <span className={`font-semibold tabular-nums shrink-0 ${p.reversed ? 'text-slate-400 line-through' : 'text-slate-800'}`}>
@@ -298,7 +302,7 @@ function ItemCard({
                   <button className="text-teal-700 text-xs mt-0.5 ml-3" onClick={() => setEditingPayment(p)}>
                     تعديل
                   </button>
-                  <ReverseControl entryId={p.id} label="إلغاء الدفعة دي" />
+                  <ReverseControl entryId={p.id} label={p.amountQirsh === 0 ? 'إلغاء التسجيل ده' : 'إلغاء الدفعة دي'} />
                 </>
               )}
             </li>

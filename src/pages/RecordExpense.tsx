@@ -4,11 +4,14 @@ import {
   LedgerError,
   getVaultBalanceQirsh,
   listCategories,
+  listSupplierAccounts,
+  listSupplierNames,
   recordAdvance,
   recordExpense,
   recordExpenseWithPayable,
   recordSplitExpense,
   recordSplitExpenseWithPayable,
+  supplierKey,
 } from '../domain/ledger'
 import { egpToQirsh, formatEGP } from '../domain/money'
 import { Banner, Button, Card, Field, PageTitle, inputClass } from '../components/ui'
@@ -18,10 +21,15 @@ const todayIso = () => new Date().toISOString().slice(0, 10)
 
 type Mode = 'single' | 'split' | 'advance'
 
-export function RecordExpense({ onDone }: { onDone: () => void }) {
+/** Suggestions for every supplier field on this screen (see listSupplierNames). */
+const SUPPLIER_LIST_ID = 'supplier-names'
+
+/** `initialSupplier` opens the screen ready to add an item to that supplier's account. */
+export function RecordExpense({ onDone, initialSupplier }: { onDone: () => void; initialSupplier?: string }) {
   const activeCategories = useLiveQuery(async () => (await listCategories()).filter((c) => c.active), [])
   const balanceQirsh = useLiveQuery(getVaultBalanceQirsh, [])
-  const [mode, setMode] = useState<Mode>('single')
+  const supplierNames = useLiveQuery(listSupplierNames, [])
+  const [mode, setMode] = useState<Mode>(initialSupplier ? 'advance' : 'single')
 
   const list = activeCategories ?? []
   const noCategories = list.length === 0
@@ -52,7 +60,13 @@ export function RecordExpense({ onDone }: { onDone: () => void }) {
       )}
       {mode === 'split' && !noCategories && <SplitExpenseForm categories={list} balanceQirsh={balanceQirsh} onDone={onDone} />}
       {mode === 'single' && !noCategories && <SingleExpenseForm categories={list} balanceQirsh={balanceQirsh} onDone={onDone} />}
-      {mode === 'advance' && <AdvanceForm balanceQirsh={balanceQirsh} onDone={onDone} />}
+      {mode === 'advance' && <AdvanceForm balanceQirsh={balanceQirsh} initialSupplier={initialSupplier} onDone={onDone} />}
+
+      <datalist id={SUPPLIER_LIST_ID}>
+        {(supplierNames ?? []).map((name) => (
+          <option key={name} value={name} />
+        ))}
+      </datalist>
     </div>
   )
 }
@@ -81,18 +95,27 @@ function ModeButton({
   )
 }
 
-function AdvanceForm({ balanceQirsh, onDone }: { balanceQirsh: number | undefined; onDone: () => void }) {
+function AdvanceForm({
+  balanceQirsh,
+  initialSupplier,
+  onDone,
+}: {
+  balanceQirsh: number | undefined
+  initialSupplier?: string
+  onDone: () => void
+}) {
+  const accounts = useLiveQuery(listSupplierAccounts, [])
   const [amount, setAmount] = useState('')
   const [date, setDate] = useState(todayIso())
   const [description, setDescription] = useState('')
   const [total, setTotal] = useState('')
   const [quantity, setQuantity] = useState('')
   const [unitName, setUnitName] = useState('')
-  const [counterparty, setCounterparty] = useState('')
+  const [counterparty, setCounterparty] = useState(initialSupplier ?? '')
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('CASH')
   const [invoiceNumber, setInvoiceNumber] = useState('')
   const [error, setError] = useState('')
-  const [success, setSuccess] = useState(false)
+  const [success, setSuccess] = useState('')
 
   const amountQirsh = Number(amount) > 0 ? egpToQirsh(Number(amount)) : 0
   const willExceed = balanceQirsh !== undefined && amountQirsh > balanceQirsh
@@ -100,10 +123,13 @@ function AdvanceForm({ balanceQirsh, onDone }: { balanceQirsh: number | undefine
   // Empty or 0 = the full price isn't known yet; it can be set on the item later.
   const totalQirsh = Number(total) > 0 ? egpToQirsh(Number(total)) : 0
   const totalInvalid = totalQirsh > 0 && totalQirsh < amountQirsh
+  // Nothing paid now is fine when the price is known: the item goes on the supplier's account.
+  const nothingEntered = amountQirsh <= 0 && totalQirsh <= 0
+  const supplierAccount = (accounts ?? []).find((a) => a.name === supplierKey(counterparty))
 
   async function submit() {
     setError('')
-    setSuccess(false)
+    setSuccess('')
     try {
       await recordAdvance({
         amountQirsh,
@@ -121,9 +147,14 @@ function AdvanceForm({ balanceQirsh, onDone }: { balanceQirsh: number | undefine
       setDescription('')
       setQuantity('')
       setUnitName('')
-      setCounterparty('')
+      // Opened for one supplier's account: stay on it, the next item is likely theirs too.
+      if (!initialSupplier) setCounterparty('')
       setInvoiceNumber('')
-      setSuccess(true)
+      setSuccess(
+        amountQirsh > 0
+          ? 'تم التسجيل والخصم من الصندوق. وزّعه على البنود، أو ضيف باقي حسابه، من تبويب «الأصناف والدفعات» بالتقارير'
+          : 'تم تسجيل الصنف على حساب المورد من غير خصم من الصندوق. ادفع له من «المستحقات للموردين»، ووزّعه على البنود من «الأصناف والدفعات»',
+      )
     } catch (e) {
       setError(e instanceof LedgerError ? e.message : 'حدث خطأ غير متوقع')
     }
@@ -132,11 +163,7 @@ function AdvanceForm({ balanceQirsh, onDone }: { balanceQirsh: number | undefine
   return (
     <>
       {error && <Banner kind="error">{error}</Banner>}
-      {success && (
-        <Banner kind="success">
-          تم التسجيل والخصم من الصندوق. وزّعه على البنود، أو ضيف باقي حسابه، من تبويب «الأصناف والدفعات» بالتقارير
-        </Banner>
-      )}
+      {success && <Banner kind="success">{success}</Banner>}
       {willExceed && <Banner kind="error">القيمة أكبر من الرصيد المتاح في الصندوق</Banner>}
 
       <Card>
@@ -147,7 +174,7 @@ function AdvanceForm({ balanceQirsh, onDone }: { balanceQirsh: number | undefine
         <Field label="اسم الصنف / الوصف">
           <input className={inputClass} value={description} maxLength={60} onChange={(e) => setDescription(e.target.value)} placeholder="مثال: رمل، أو دفعة مقدمة للمقاول" />
         </Field>
-        <Field label="المدفوع الآن (ج.م)" hint="ممكن يكون عربون بس">
+        <Field label="المدفوع الآن (ج.م)" hint="ممكن يكون عربون بس، أو تسيبه فاضي لو الصنف على حساب المورد وإجمالي حسابه مكتوب">
           <input type="number" inputMode="decimal" className={inputClass} value={amount} onChange={(e) => setAmount(e.target.value)} />
         </Field>
         <Field label="إجمالي الحساب (اختياري)" hint="لو لسه مش معروف سيبه فاضي، وتحدده بعدين من كارت الصنف">
@@ -177,8 +204,14 @@ function AdvanceForm({ balanceQirsh, onDone }: { balanceQirsh: number | undefine
           <input type="date" className={inputClass} value={date} onChange={(e) => setDate(e.target.value)} />
         </Field>
         <Field label="المورد / المستفيد (اختياري)">
-          <input className={inputClass} value={counterparty} onChange={(e) => setCounterparty(e.target.value)} />
+          <input className={inputClass} list={SUPPLIER_LIST_ID} value={counterparty} onChange={(e) => setCounterparty(e.target.value)} />
         </Field>
+        {supplierAccount && (
+          <p className="text-xs text-amber-700 -mt-2 mb-3">
+            حساب {supplierAccount.name} دلوقتي: باقي عليه {formatEGP(supplierAccount.remainingQirsh)}
+            {totalQirsh > 0 && !totalInvalid && ` · بعد الصنف ده: ${formatEGP(supplierAccount.remainingQirsh + totalQirsh - amountQirsh)}`}
+          </p>
+        )}
         <Field label="طريقة الدفع">
           <select className={inputClass} value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)}>
             {Object.entries(PAYMENT_METHOD_LABELS).map(([k, v]) => (
@@ -193,7 +226,7 @@ function AdvanceForm({ balanceQirsh, onDone }: { balanceQirsh: number | undefine
         </Field>
 
         <div className="flex gap-2">
-          <Button className="flex-1" onClick={submit} disabled={amountQirsh <= 0 || quantityInvalid || totalInvalid}>
+          <Button className="flex-1" onClick={submit} disabled={nothingEntered || quantityInvalid || totalInvalid}>
             تسجيل الصنف
           </Button>
           <Button variant="secondary" onClick={onDone}>
@@ -315,7 +348,7 @@ function SingleExpenseForm({
           <input className={inputClass} value={description} onChange={(e) => setDescription(e.target.value)} />
         </Field>
         <Field label={isPartial ? 'اسم المورد' : 'المورد / المستفيد (اختياري)'}>
-          <input className={inputClass} value={counterparty} onChange={(e) => setCounterparty(e.target.value)} />
+          <input className={inputClass} list={SUPPLIER_LIST_ID} value={counterparty} onChange={(e) => setCounterparty(e.target.value)} />
         </Field>
         <Field label="طريقة الدفع">
           <select className={inputClass} value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)}>
@@ -455,7 +488,7 @@ function SplitExpenseForm({
         </label>
 
         <Field label={isPartial ? 'اسم المورد' : 'المورد / المستفيد (اختياري)'}>
-          <input className={inputClass} value={counterparty} onChange={(e) => setCounterparty(e.target.value)} />
+          <input className={inputClass} list={SUPPLIER_LIST_ID} value={counterparty} onChange={(e) => setCounterparty(e.target.value)} />
         </Field>
         <Field label="طريقة الدفع">
           <select className={inputClass} value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)}>

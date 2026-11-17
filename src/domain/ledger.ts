@@ -697,7 +697,12 @@ export interface RecordAdvanceInput {
 }
 
 export async function recordAdvance(input: RecordAdvanceInput): Promise<LedgerEntry> {
-  if (input.amountQirsh <= 0) throw new LedgerError('قيمة الدفعة يجب أن تكون أكبر من صفر')
+  // Nothing paid now is fine for an item bought on the supplier's account,
+  // as long as its price is known: the whole price is then owed.
+  if (input.amountQirsh < 0) throw new LedgerError('قيمة المدفوع لا يمكن أن تكون بالسالب')
+  if (input.amountQirsh === 0 && !(input.agreedTotalQirsh !== undefined && input.agreedTotalQirsh > 0)) {
+    throw new LedgerError('اكتب المدفوع الآن، أو إجمالي الحساب لو الصنف على حساب المورد من غير دفع')
+  }
   if (input.quantity !== undefined && !(input.quantity > 0)) throw new LedgerError('الكمية يجب أن تكون أكبر من صفر')
   if (input.agreedTotalQirsh !== undefined && input.agreedTotalQirsh < input.amountQirsh) {
     throw new LedgerError('المدفوع الآن أكبر من إجمالي الحساب')
@@ -720,7 +725,7 @@ export async function recordAdvance(input: RecordAdvanceInput): Promise<LedgerEn
       createdAt: new Date().toISOString(),
     }
     await db.ledger.add(entry)
-    await recordFunderAllocations(entry.id, input.amountQirsh, activeFunders)
+    if (input.amountQirsh > 0) await recordFunderAllocations(entry.id, input.amountQirsh, activeFunders)
     return entry
   })
 }
@@ -845,7 +850,9 @@ export async function getAdvanceStatus(advanceId: string): Promise<AdvanceStatus
   }
   const sharedQirsh = shares.reduce((s, c) => s + c.amountQirsh, 0)
   const agreedTotalQirsh = advance.agreedTotalQirsh !== undefined && advance.agreedTotalQirsh > 0 ? advance.agreedTotalQirsh : null
-  const cancelled = totalPaidQirsh <= 0
+  // Not "nothing paid": an item bought on account has a standing first
+  // entry of 0 and is very much alive.
+  const cancelled = payments.every((p) => p.reversed)
 
   return {
     advance,
@@ -890,7 +897,7 @@ export async function listAdvanceItems(): Promise<AdvanceStatus[]> {
   const all = await db.ledger.where('type').equals('ADVANCE').toArray()
   const statuses = await Promise.all(all.filter(isItemOrigin).map((a) => getAdvanceStatus(a.id)))
   return statuses
-    .filter((s) => s.totalPaidQirsh !== 0 || s.shares.length > 0 || s.fixedAllocatedQirsh !== 0)
+    .filter((s) => !s.cancelled || s.shares.length > 0 || s.fixedAllocatedQirsh !== 0)
     .sort((a, b) => a.advance.createdAt.localeCompare(b.advance.createdAt))
 }
 
@@ -1237,6 +1244,156 @@ export async function updateAdvanceItem(advanceId: string, patch: UpdateAdvanceI
     await relabelItemRows(advance, name, counterparty)
     await db.ledger.update(advanceId, { description: name, counterparty, quantity: quantity ?? undefined, unitName })
   })
+}
+
+// ---------------------------------------------------------------------------
+// Supplier accounts — everything bought from one supplier seen as a single
+// running account: partly-paid invoices (payables) and items with a known
+// price, whatever they are and whatever each cost. Nothing is stored for
+// this: a supplier is the name written on the purchases, and the account is
+// derived from them, so renaming or cancelling a purchase keeps it right.
+// ---------------------------------------------------------------------------
+
+/** Same supplier however it was typed: outer and repeated spaces don't count. */
+export const supplierKey = (name: string | undefined) => (name ?? '').trim().replace(/\s+/g, ' ')
+
+export interface SupplierLine {
+  kind: 'payable' | 'item'
+  /** The payable's id, or the id of the item's first entry. */
+  id: string
+  title: string
+  date: string
+  createdAt: string
+  /** Full price; null for an item whose price isn't known yet. */
+  totalQirsh: number | null
+  paidQirsh: number
+  /** Still owed on this purchase; 0 while its price isn't known. */
+  remainingQirsh: number
+}
+
+export interface SupplierAccount {
+  name: string
+  /** Every standing purchase from the supplier, oldest first. */
+  lines: SupplierLine[]
+  /** Sum of the known prices, and what has been paid against them. A
+   * purchase whose price isn't known yet is listed but left out of both,
+   * so the three numbers always add up: total − paid = remaining. */
+  totalQirsh: number
+  paidQirsh: number
+  remainingQirsh: number
+}
+
+export async function listSupplierAccounts(): Promise<SupplierAccount[]> {
+  const [payables, items] = await Promise.all([listAllPayables(), listAdvanceItems()])
+  const lines = new Map<string, SupplierLine[]>()
+  const add = (name: string | undefined, line: SupplierLine) => {
+    const key = supplierKey(name)
+    if (key) lines.set(key, [...(lines.get(key) ?? []), line])
+  }
+
+  for (const p of payables) {
+    if (p.cancelled) continue
+    add(p.payable.supplierName, {
+      kind: 'payable',
+      id: p.payable.id,
+      title: p.payable.description,
+      date: p.payable.date,
+      createdAt: p.payable.createdAt,
+      totalQirsh: p.payable.totalQirsh,
+      paidQirsh: p.paidQirsh,
+      remainingQirsh: Math.max(0, p.remainingQirsh),
+    })
+  }
+  for (const i of items) {
+    if (i.cancelled) continue
+    add(i.advance.counterparty, {
+      kind: 'item',
+      id: i.advance.id,
+      title: i.advance.description,
+      date: i.advance.date,
+      createdAt: i.advance.createdAt,
+      totalQirsh: i.agreedTotalQirsh,
+      paidQirsh: i.totalPaidQirsh,
+      remainingQirsh: Math.max(0, i.owedQirsh ?? 0),
+    })
+  }
+
+  return [...lines.entries()]
+    .map(([name, own]) => {
+      const sorted = own.sort((a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt))
+      const priced = sorted.filter((l) => l.totalQirsh !== null)
+      const remainingQirsh = priced.reduce((s, l) => s + l.remainingQirsh, 0)
+      const totalQirsh = priced.reduce((s, l) => s + (l.totalQirsh ?? 0), 0)
+      return { name, lines: sorted, totalQirsh, paidQirsh: totalQirsh - remainingQirsh, remainingQirsh }
+    })
+    .sort((a, b) => b.remainingQirsh - a.remainingQirsh || a.name.localeCompare(b.name))
+}
+
+/** How a payment to a supplier spreads over what is owed to them: the
+ * oldest purchase is paid off first. One place, so the screen can show the
+ * split before it is recorded exactly as it will be recorded. */
+export function splitSupplierPayment(account: SupplierAccount, amountQirsh: number): { line: SupplierLine; amountQirsh: number }[] {
+  const parts: { line: SupplierLine; amountQirsh: number }[] = []
+  let left = amountQirsh
+  for (const line of account.lines) {
+    const pay = Math.min(left, line.remainingQirsh)
+    if (pay <= 0) continue
+    parts.push({ line, amountQirsh: pay })
+    left -= pay
+  }
+  return parts
+}
+
+export interface PaySupplierInput {
+  supplierName: string
+  amountQirsh: number
+  date: string
+  paymentMethod?: PaymentMethod
+  invoiceNumber?: string
+}
+
+/** One payment to a supplier against their whole account. It is recorded
+ * as an ordinary payment on each purchase it covers (oldest first), so
+ * every بند's cost and every purchase's balance stay exact — all of it in
+ * one transaction, or none of it. */
+export async function paySupplier(input: PaySupplierInput): Promise<LedgerEntry[]> {
+  if (input.amountQirsh <= 0) throw new LedgerError('قيمة الدفعة يجب أن تكون أكبر من صفر')
+
+  return db.transaction(
+    'rw',
+    [db.ledger, db.categories, db.funders, db.allocations, db.settings, db.payables, db.payableSettlements, db.advanceShares],
+    async () => {
+      const account = (await listSupplierAccounts()).find((a) => a.name === supplierKey(input.supplierName))
+      if (!account || account.remainingQirsh <= 0) throw new LedgerError('مفيش باقي على المورد ده')
+      if (input.amountQirsh > account.remainingQirsh) {
+        throw new LedgerError(`الدفعة أكبر من الباقي على المورد (${formatEGP(account.remainingQirsh)})`)
+      }
+      await checkCanSpend(input.amountQirsh)
+
+      const entries: LedgerEntry[] = []
+      for (const part of splitSupplierPayment(account, input.amountQirsh)) {
+        const common = { amountQirsh: part.amountQirsh, date: input.date, paymentMethod: input.paymentMethod, invoiceNumber: input.invoiceNumber }
+        entries.push(
+          part.line.kind === 'payable'
+            ? await settlePayable({ payableId: part.line.id, ...common })
+            : await recordAdvancePayment({ advanceId: part.line.id, ...common, note: 'دفعة من حساب المورد' }),
+        )
+      }
+      return entries
+    },
+  )
+}
+
+/** Supplier names already used, most recent first — offered when typing a
+ * supplier so a new purchase lands on the same account, not a near-copy. */
+export async function listSupplierNames(): Promise<string[]> {
+  const entries = (await db.ledger.toArray()).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  const names = new Set<string>()
+  for (const e of entries) {
+    const key = supplierKey(e.counterparty)
+    if (key && e.type !== 'CONTRIBUTION' && !e.reversalOfId) names.add(key)
+  }
+  return [...names]
 }
 
 export interface AdjustAdvanceItemInput {
